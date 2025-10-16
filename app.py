@@ -1,6 +1,9 @@
 # libraries
 
 import sqlite3
+import streamlit as st
+import os
+import pickle
 
 class FacialRecognitionSystem():
     def __init__(self):
@@ -22,7 +25,7 @@ class FacialRecognitionSystem():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT NOT NULL,
                 apellido TEXT NOT NULL,
-                emailL TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
                 fecha_registro_timestamp DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -57,5 +60,103 @@ class FacialRecognitionSystem():
         cursor.close()
         print( "Tablas creadas")
 
+# initial page config
+st.set_page_config(
+    page_title="Sistema de Reconocimiento Facial",
+    layout="wide",
+    page_icon="📷"
+)
+
+# initialize system (st web page)
+if 'system' not in st.session_state:
+    st.session_state.system = FacialRecognitionSystem()
+
+def main():
+    st.sidebar.title("Sistema de Reconocimiento Facial")
+    page = st.sidebar.radio(
+        "Navegacion",
+        ["Registro", "Deteccion en Tiempo Real", "Reportes y estadisticas"]
+    )
+
+    if page == "Registro":
+        show_registration_page()
+    elif page == "Deteccion en Tiempo Real":
+        show_registration_page()
+        #show_real_time_detection_page()
+    elif page == "Reportes y estadisticas":
+        show_registration_page()
+        #show_reports_page()
+
+# registration page
+def show_registration_page():
+    st.title("Registro de personas")
+
+    col1, col2 = st.columns([1,1])
+
+    with col1: 
+        st.subheader("Datos personales")
+
+        with st.form("registrarion_form"):
+            nombre = st.text_input("Nombre")
+            apellido = st.text_input("Apellido")
+            email = st.text_input("Email")
+
+            submitted = st.form_submit_button("Registrar persona")
+
+            if submitted:
+                if nombre and apellido and email:
+                   if register_person(nombre, apellido, email):
+                       st.success("Persona registrada exitosamente")
+                   else:
+                       st.error("Error al registrar persona, asegurase de validar todos los campos")
+
+    with col2: 
+        st.subheader("Rostro")
+
+        # camera selector
+        camera_index = st.selectbox("Seleccione la camara", [0, 1, 2])
+
+        if st.button("Iniciar captura de rostro"):
+            capture_face(camera_index) # TO DO
+
+    # DEBUG IN ST 
+    email = st.text_input("Escribe el email de la persona a buscar")
+    if st.button("Buscar persona"):
+        show_registered_person(email)
+
+def register_person(nombre, apellido, email):
+    try: 
+        cursor= st.session_state['system'].conn.cursor()
+        
+        # verify email with id
+        cursor.execute("SELECT id from Persona WHERE email = ?", (email,))
+        if cursor.fetchone():
+            st.error("Email ya registrado")
+            return False
+        
+        # insert new person 
+        cursor.execute("INSERT INTO Persona (nombre, apellido, email) VALUES (?, ?, ?)", (nombre, apellido, email) )
+        st.session_state['system'].conn.commit()
+        return True
+    
+    except Exception as e:
+        st.error(f"Error al registrar persona: {e}")
+        return False
+    
+# DEBUG FUNCTION: show all registered persons
+
+def show_registered_person(email):
+    cursor = st.session_state['system'].conn.cursor()
+    cursor.execute("SELECT * FROM Persona WHERE email=?", (email,))
+    person = cursor.fetchone()
+
+    if person:
+        st.write("Persona encontrada")
+        st.write(f"Nombre: {person[1]}")
+        st.write(f"Apellido: {person[2]}")
+        st.write(f"Email: {person[3]}")
+    else:
+        st.write("Persona no encontrada")
+
 if __name__ == "__main__":
-    FacialRecognitionSystem()
+    main()
