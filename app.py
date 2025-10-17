@@ -4,6 +4,8 @@ import sqlite3
 import streamlit as st
 import os
 import pickle
+import numpy as np
+import time
 
 class FacialRecognitionSystem():
     def __init__(self):
@@ -81,7 +83,7 @@ def main():
     if page == "Registro":
         show_registration_page()
     elif page == "Deteccion en Tiempo Real":
-        show_registration_page()
+        show_detection_page()
         #show_real_time_detection_page()
     elif page == "Reportes y estadisticas":
         show_registration_page()
@@ -157,6 +159,63 @@ def show_registered_person(email):
         st.write(f"Email: {person[3]}")
     else:
         st.write("Persona no encontrada")
+
+# detection page
+
+def show_detection_page():
+     st.title("Deteccion en tiempo real")
+
+     col1, col2 = st.columns([2,1])
+
+     with col1:
+        st.subheader("Vista de camara")
+
+        # detection controls
+        col_controls = st.columns(3)
+        # detection controls
+        with col_controls[0]:
+            start_detection = st.button("Iniciar Deteccion")
+        with col_controls[1]:
+            stop_detection = st.button("Detener Deteccion")
+        with col_controls[2]:
+            camera_select = st.selectbox("Camara", [0, 1, 2], key="detection_cam")
+
+    #placeholder for video
+
+        video_placeholder= st.empty()
+
+        if start_detection:
+
+            #TO DO: Implement logic
+
+            st.infor("Deteccion iniciada")
+
+            for i in range(10):
+                with video_placeholder.container():
+                    #create AI image using numpy
+                    img = np.random.randint(0, 255, size=(480, 640, 3), dtype=np.uint8)
+
+                    # simulate detection
+                    st.image(img, caption="Vista de cámara en tiempo real", use_column_width=True)
+
+                    # show detection (IMPLEMENT LOGIC)
+                    st.info(f"Persona detectada: Carlos (Confianza: 100%)")
+
+                time.sleep(2)
+
+        if stop_detection:
+            st.warning("Deteccion detenida")
+            video_placeholder.empty()
+
+     with col2:
+        st.subheader("Informacion de Deteccion")
+
+        # placeholder
+        st.info("Esperando deteccion...")
+
+        # last detection
+        st.subheader("Ultima detecciones hechas")
+        display_recent_detections()
 
 if __name__ == "__main__":
     main()
