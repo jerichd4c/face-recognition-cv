@@ -6,6 +6,8 @@ import os
 import pickle
 import numpy as np
 import time
+import pandas as pd
+import plotly.express as px
 
 class FacialRecognitionSystem():
     def __init__(self):
@@ -84,10 +86,8 @@ def main():
         show_registration_page()
     elif page == "Deteccion en Tiempo Real":
         show_detection_page()
-        #show_real_time_detection_page()
     elif page == "Reportes y estadisticas":
-        show_registration_page()
-        #show_reports_page()
+        show_reports_page()
 
 # registration page
 def show_registration_page():
@@ -119,7 +119,7 @@ def show_registration_page():
         camera_index = st.selectbox("Seleccione la camara", [0, 1, 2])
 
         if st.button("Iniciar captura de rostro"):
-            capture_face(camera_index) # TO DO
+            capture_faces(camera_index) # TO DO
 
     # DEBUG IN ST 
     email = st.text_input("Escribe el email de la persona a buscar")
@@ -216,6 +216,106 @@ def show_detection_page():
         # last detection
         st.subheader("Ultima detecciones hechas")
         display_recent_detections()
+
+# reports page
+
+def show_reports_page():
+    st.title("Reportes y estadisticas")
+    
+    tab1, tab2, tab3 = st.tabs(["Graficos de emociones", "Estadisticas generales", "Historial de detecciones" ])
+
+    with tab1:
+        show_emotion_charts()
+    with tab2:
+        show_general_stats()
+    with tab3:
+        show_detection_history()
+
+# PAGE FUNCTIONS (REPORTS PAGE)
+
+# emotions chart
+
+def show_emotion_charts():
+    st.subheader("Distribucion de emociones")
+
+    # mock data
+
+    emotions_data = {
+        'Persona': ['Juan Pérez', 'María García', 'Carlos López', 'Ana Martínez'],
+        'Feliz': [45, 30, 25, 40],
+        'Triste': [15, 25, 30, 20],
+        'Enojado': [10, 15, 20, 5],
+        'Sorprendido': [20, 20, 15, 25],
+        'Neutral': [10, 10, 10, 10]
+    }
+
+    df= pd.DataFrame(emotions_data)
+
+    fig = px.bar(df, x='Persona', y=['Feliz', 'Triste', 'Enojado', 'Sorprendido', 'Neutral'],
+                 title="Distribucion de emociones por persona",
+                 labels={"value": "Porcentaje", "variable": "Emocion" })
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# general stats
+
+def show_general_stats():
+    st.subheader("Estadisticas generales")
+
+    col1 , col2, col3, col4 = st.columns(4)
+
+    # example 
+
+    with col1:
+        st.metric("Total de personas registradas", "25")
+    with col2:
+        st.metric("Total de detecciones realizadas", "156")
+    with col3:
+        st.metric("Emocion predominante", "Feliz")
+    with col4:
+        st.metric("Porcentaje de emociones", "94.2%")
+    
+    # detection graph per hour
+
+    st.subheader("Detecciones por hora")
+    hours = list(range(24))
+    detections = [5, 3, 2, 1, 1, 2, 8, 15, 20, 18, 16, 14, 16, 15, 12, 10, 8, 12, 15, 14, 10, 8, 6, 4]
+
+    fig = px.line(x=hours, y=detections, title='Patrón de Detecciones por Hora',
+                  labels={'x': 'Hora del día', 'y': 'Número de detecciones'})
+    st.plotly_chart(fig, use_container_width=True)
+
+# history
+
+def show_detection_history():
+    st.subheader("Historial de detecciones")
+    
+    # filters
+    col1, col2, col3 =st.columns(3)
+
+    with col1:
+        date_filter = st.date_input("Filtrar por fecha")
+    with col2:
+        person_filter = st.selectbox("Filtrar por persona", ["Todas", "Juan Pérez", "María García", "Carlos López"])
+    with col3:
+        emotion_filter = st.selectbox("Filtrar por emoción", ["Todas", "Feliz", "Triste", "Enojado", "Sorprendido"])
+    
+    # save button CSV file
+
+    if st.button("Guardar reporte en CSV"):
+        st.success("Reporte guardado exitosamente (TO DO)")
+
+    # detection table (mock data)
+
+    detection_data = {
+        'Fecha/Hora': ['2024-01-15 08:30:15', '2024-01-15 09:15:22', '2024-01-15 10:05:47'],
+        'Persona': ['Juan Pérez', 'María García', 'Carlos López'],
+        'Emoción': ['Feliz', 'Neutral', 'Sorprendido'],
+        'Confianza': ['95.2%', '88.7%', '92.1%']
+    }
+    
+    df = pd.DataFrame(detection_data)
+    st.dataframe(df, use_container_width=True)
 
 if __name__ == "__main__":
     main()
