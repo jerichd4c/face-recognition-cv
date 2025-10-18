@@ -13,8 +13,8 @@ class FacialRecognitionSystem():
     def __init__(self):
         self.init_database()
             
+    #initialize database
     def init_database(self):
-        #initialize database
         self.conn = sqlite3.connect('facial_recognition.db', check_same_thread=False)
         cursor = self.conn.cursor()
 
@@ -119,13 +119,28 @@ def show_registration_page():
         camera_index = st.selectbox("Seleccione la camara", [0, 1, 2])
 
         if st.button("Iniciar captura de rostro"):
-            capture_faces(camera_index) # TO DO
+            capture_faces(camera_index) 
 
-    # DEBUG IN ST 
+    # search person
     email = st.text_input("Escribe el email de la persona a buscar")
     if st.button("Buscar persona"):
         show_registered_person(email)
 
+# show registered person
+def show_registered_person(email):
+    cursor = st.session_state['system'].conn.cursor()
+    cursor.execute("SELECT * FROM Persona WHERE email=?", (email,))
+    person = cursor.fetchone()
+
+    if person:
+        st.write("Persona encontrada")
+        st.write(f"Nombre: {person[1]}")
+        st.write(f"Apellido: {person[2]}")
+        st.write(f"Email: {person[3]}")
+    else:
+        st.write("Persona no encontrada")
+
+# register person
 def register_person(nombre, apellido, email):
     try: 
         cursor= st.session_state['system'].conn.cursor()
@@ -145,23 +160,37 @@ def register_person(nombre, apellido, email):
         st.error(f"Error al registrar persona: {e}")
         return False
     
-# DEBUG FUNCTION: show all registered persons
+# capture faces (implement logic later)
+def capture_faces(camera_index):
+    st.info("Iniciando captural facial...")
 
-def show_registered_person(email):
-    cursor = st.session_state['system'].conn.cursor()
-    cursor.execute("SELECT * FROM Persona WHERE email=?", (email,))
-    person = cursor.fetchone()
+    # TO DO
+    st.warning("WIP - funcion no implementada")
 
-    if person:
-        st.write("Persona encontrada")
-        st.write(f"Nombre: {person[1]}")
-        st.write(f"Apellido: {person[2]}")
-        st.write(f"Email: {person[3]}")
-    else:
-        st.write("Persona no encontrada")
+    # EXAMPLE
+
+    #  """
+    # cap = cv2.VideoCapture(camera_index)
+    # captured_faces = 0
+    # max_faces = 5
+    
+    # while captured_faces < max_faces:
+    #     ret, frame = cap.read()
+    #     if not ret:
+    #         break
+            
+    #     # Detectar rostros y extraer embeddings
+    #     # Guardar embeddings en la base de datos
+    #     # Mostrar vista previa
+        
+    #     captured_faces += 1
+    #     time.sleep(1)
+    
+    # cap.release()
+    # """
+
 
 # detection page
-
 def show_detection_page():
      st.title("Deteccion en tiempo real")
 
@@ -188,7 +217,7 @@ def show_detection_page():
 
             #TO DO: Implement logic
 
-            st.infor("Deteccion iniciada")
+            st.info("Deteccion iniciada")
 
             for i in range(10):
                 with video_placeholder.container():
@@ -217,8 +246,64 @@ def show_detection_page():
         st.subheader("Ultima detecciones hechas")
         display_recent_detections()
 
-# reports page
+# display recent detections
 
+def display_recent_detections():
+    
+    try: 
+        cursor = st.session_state.system.conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(P.nombre, 'Desconocido') as nombre,
+                   COALESCE(P.apellido, '') as apellido,
+                   D.emocion, D.confianza, D.timestamp
+            FROM Deteccion D
+            LEFT JOIN Persona P ON D.id_persona = P.id
+            ORDER BY D.timestamp DESC
+            LIMIT 5
+        """)
+
+        detections = cursor.fetchall()
+
+        if detections:
+            for det in detections:
+                nombre = det[0] or "Desconocido"
+                apellido = det[1] or ""
+                emocion = det[2] or "Desconocida"
+                confianza = det[3]
+                # normalize confidence: allow both 0-1 and 0-100 ranges
+                conf_percent = None
+                try:
+                    conf_val = float(confianza)
+                    if conf_val <= 1.0:
+                        conf_percent = conf_val * 100
+                    else:
+                        # assume value already in percentage-scale (0-100)
+                        conf_percent = conf_val
+                except Exception:
+                    conf_percent = None
+
+                timestamp = det[4]
+
+                with st.container():
+                    st.write(f"**{nombre} {apellido}**")
+                    if conf_percent is not None:
+                        st.write(f"Emoción: {emocion} ({conf_percent:.1f}%)")
+                    else:
+                        st.write(f"Emoción: {emocion} (confianza: {confianza})")
+                    st.write(f"Hora: {timestamp}")
+                    st.divider()
+
+        else:
+            st.write("No hay detecciones registradas")
+    except Exception as e:
+        st.error(f"Error al mostrar detecciones: {e}")
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+        
+# reports page
 def show_reports_page():
     st.title("Reportes y estadisticas")
     
@@ -234,7 +319,6 @@ def show_reports_page():
 # PAGE FUNCTIONS (REPORTS PAGE)
 
 # emotions chart
-
 def show_emotion_charts():
     st.subheader("Distribucion de emociones")
 
@@ -258,7 +342,6 @@ def show_emotion_charts():
     st.plotly_chart(fig, use_container_width=True)
 
 # general stats
-
 def show_general_stats():
     st.subheader("Estadisticas generales")
 
@@ -286,7 +369,6 @@ def show_general_stats():
     st.plotly_chart(fig, use_container_width=True)
 
 # history
-
 def show_detection_history():
     st.subheader("Historial de detecciones")
     
@@ -319,3 +401,11 @@ def show_detection_history():
 
 if __name__ == "__main__":
     main()
+
+# TO DO LIST 
+
+# - implement openCV for face detection (ex: captureFaces, complete show_detection_page)
+# - implement facial embedding extraction
+# - connect detection module with deepFace
+# - delete mock data and replace with real data (datasets, etc) and use it on reports page
+# - do logic for save as CSV
