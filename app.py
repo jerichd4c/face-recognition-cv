@@ -607,15 +607,16 @@ def show_emotion_charts():
 
             df_data = []
             for row in data:
+                # normalize column names to use in the chart
                 df_data.append({
                     "Persona": row[0],
                     "Emocion": row[1],
-                    "Conteo": row[2]
+                    "Cantidad": row[2]
                 })
             df = pd.DataFrame(df_data)
 
             # emotion graph
-            fig = px.bar(df, x='Persona', y='Cantidad', color='Emoción',
+            fig = px.bar(df, x='Persona', y='Cantidad', color='Emocion',
                         title='Distribución de Emociones por Persona')
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -634,17 +635,17 @@ def show_general_stats():
         col1 , col2, col3, col4 = st.columns(4)
 
         # registered persons
-        cursor.execute("SELECT COUNT(*) FROM personas")
+        cursor.execute("SELECT COUNT(*) FROM Persona")
         total_personas = cursor.fetchone()[0]
 
         # detections today
-        cursor.execute("SELECT COUNT(*) FROM detecciones WHERE DATE(timestamp) = DATE('now')")
+        cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE DATE(timestamp) = DATE('now')")
         detecciones_hoy = cursor.fetchone()[0]  
 
         # most common emotion
         cursor.execute("""
             SELECT emocion, COUNT(*) as count 
-            FROM detecciones 
+            FROM Deteccion 
             GROUP BY emocion 
             ORDER BY count DESC 
             LIMIT 1
@@ -653,9 +654,9 @@ def show_general_stats():
         emocion_predominante = emocion_data[0] if emocion_data else "N/A"
 
         # recognition rate (estimated)
-        cursor.execute("SELECT COUNT(*) FROM detecciones WHERE confianza > 0.7")
+        cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE confianza > 0.7")
         reconocimientos_confiables = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM detecciones")
+        cursor.execute("SELECT COUNT(*) FROM Deteccion")
         total_detecciones = cursor.fetchone()[0]
         
         tasa_reconocimiento = (reconocimientos_confiables / total_detecciones * 100) if total_detecciones > 0 else 0
@@ -709,7 +710,7 @@ def show_detection_history():
             date_filter = st.date_input("Filtrar por fecha")
         with col2:
             cursor = st.session_state.system.conn.cursor()
-            cursor.execute("SELECT id, nombre || ' ' || apellido FROM personas")
+            cursor.execute("SELECT id, nombre || ' ' || apellido FROM Persona")
             personas = cursor.fetchall()
             persona_options = ["Todas"] + [p[1] for p in personas]
             person_filter = st.selectbox("Filtrar por persona", persona_options)
@@ -719,7 +720,7 @@ def show_detection_history():
         
         # build querys
 
-        query = """"
+        query = """
             SELECT D.timestamp, P.nombre, P.apellido, D.emocion, D.confianza
             FROM Deteccion D
             JOIN Persona P ON D.id_persona = P.id
@@ -731,15 +732,15 @@ def show_detection_history():
         # apply filters
 
         if date_filter:
-                query += " AND DATE(d.timestamp) = ?"
+                query += " AND DATE(D.timestamp) = ?"
                 params.append(date_filter.strftime('%Y-%m-%d'))
             
         if person_filter != "Todas":
-                query += " AND p.nombre || ' ' || p.apellido = ?"
+                query += " AND P.nombre || ' ' || P.apellido = ?"
                 params.append(person_filter)
             
         if emotion_filter != "Todas":
-                query += " AND d.emocion = ?"
+                query += " AND D.emocion = ?"
                 params.append(emotion_filter)
             
         query += " ORDER BY d.timestamp DESC"
@@ -753,20 +754,32 @@ def show_detection_history():
         if detections:
             df = pd.DataFrame(detections, columns=['Fecha/Hora', 'Nombre', 'Apellido', 'Emoción', 'Confianza'])
 
-            df['Confianza'] = df['Confianza'].apply(lambda x: f"{x*100:.1%}")
+            # normalize confidence values (allow both 0-1 and 0-100 scales)
+            def fmt_conf(x):
+                try:
+                    v = float(x)
+                    if v <= 1.0:
+                        return f"{v*100:.1f}%"
+                    else:
+                        return f"{v:.1f}%"
+                except Exception:
+                    return str(x)
+
+            df['Confianza'] = df['Confianza'].apply(fmt_conf)
             st.dataframe(df, use_container_width=True)
 
         # save button CSV file
 
-        if st.button("Guardar reporte en CSV"):
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="Descargar CSV",
-                data=csv,
-                file_name=f"detecciones_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-        else: 
+        if detections:
+            if st.button("Guardar reporte en CSV"):
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="Descargar CSV",
+                    data=csv,
+                    file_name=f"detecciones_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+        else:
             st.info("No hay datos para mostrar con los filtros seleccionados")
 
     except Exception as e:
