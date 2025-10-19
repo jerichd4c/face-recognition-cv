@@ -8,10 +8,23 @@ import numpy as np
 import time
 import pandas as pd
 import plotly.express as px
+from deepface import DeepFace
+from sklearn.metrics.pairwise import cosine_similarity
+import cv2
+
+# initial page config
+st.set_page_config(
+    page_title="Sistema de Reconocimiento Facial",
+    layout="wide",
+    page_icon="📷"
+)
 
 class FacialRecognitionSystem():
     def __init__(self):
         self.init_database()
+        self.load_face_models()
+        self.detection_active = False
+        self.cap = None
             
     #initialize database
     def init_database(self):
@@ -64,16 +77,109 @@ class FacialRecognitionSystem():
         cursor.close()
         print( "Tablas creadas")
 
-# initial page config
-st.set_page_config(
-    page_title="Sistema de Reconocimiento Facial",
-    layout="wide",
-    page_icon="📷"
-)
+
+    # load facial recognition and embedding model
+
+    def load_face_models(self):
+
+        try:
+            if os.path.exists('face_embeddings.pk1'):
+                with open('face_embeddings.pk1', 'rb') as f:
+                    self.face_embeddings = pickle.load(f)
+            else:
+                self.face_embeddings = {}
+
+            if os.path.exists("persona_embeddings.pk1"):
+                with open("persona_embeddings.pk1", "rb") as f:
+                    self.persona_embeddings = pickle.load(f)
+            else:
+                self.persona_embeddings = {}
+
+        except Exception as e:
+            st.error(f"Error al cargar modelos de reconocimiento facial: {e}")
+            self.known_embeddings = {}
+            self.persona_embeddings = {}
+
+    # save face embeddings
+
+    def save_face_embeddings(self):
+
+        try: 
+            with open('face_embeddings.pk1', 'wb') as f:
+                pickle.dump(self.face_embeddings, f)
+
+            with open('persona_embeddings.pk1', 'wb') as f:
+                pickle.dump(self.persona_embeddings, f)
+
+        except Exception as e:
+            st.error(f"Error al guardar embeddings: {e}")
+
+    # extract face embeddings
+
+    def extract_embeddings(self, image_array):
+
+        try: 
+            # uses DeepFace
+            result = DeepFace.represent(
+                img_path = image_array,
+                model_name = "Facenet",
+                enforce_detection = False
+            )
+            if result:
+                return result[0]["embedding"]
+            return None
+        except Exception as e:
+            st.error(f"Error al extraer embeddings: {e}")
+            return None
+
+    # analyze emotions
+
+    def analyze_emotions(self, image_array):
+
+        try:
+            analysis = DeepFace.analyze(
+            img_path = image_array,
+            actions = ['emotion'],
+            enforce_detection = False
+            )
+            if analysis:
+                emotion = analysis[0]["dominant_emotion"]
+                confidence = analysis[0]["emotion"][emotion] / 100
+                return emotion, confidence
+            return "neutral", 0.0 
+        except Exception as e:
+            st.error(f"Error al analizar emociones: {e}")
+            return "neutral", 0.0
+    
+    # recognize face
+
+    def recognize_face(self, embedding, threshold=0.6): 
+
+        try: 
+            best_match = None
+            best_score = 0
+
+            for person_id, stored_embedding in self.persona_embeddings.items():
+                
+                # calc similarity
+
+                similarity = cosine_similarity([embedding], [stored_embedding])[0][0]
+
+                if similarity > best_score:
+                    best_score = similarity
+                    best_match = person_id
+
+            return best_match, best_score
+
+        except Exception as e:
+            st.error(f"Error al reconocer rostro: {e}")
+            return None, 0 
 
 # initialize system (st web page)
 if 'system' not in st.session_state:
     st.session_state.system = FacialRecognitionSystem()
+    st.session_state.capture_active = False
+    st.session_state.detection_active = False
 
 def main():
     st.sidebar.title("Sistema de Reconocimiento Facial")
@@ -107,19 +213,34 @@ def show_registration_page():
 
             if submitted:
                 if nombre and apellido and email:
-                   if register_person(nombre, apellido, email):
+                   person_id = register_person(nombre, apellido, email)
+                   if person_id:
+                       st.session_state.current_person_id = person_id
                        st.success("Persona registrada exitosamente")
                    else:
                        st.error("Error al registrar persona, asegurase de validar todos los campos")
 
     with col2: 
-        st.subheader("Rostro")
+        st.subheader("Captura facial")
+
+        if 'current_person_id' not in st.session_state:
+            st.warning("Primero registre una persona")
+            return
 
         # camera selector
         camera_index = st.selectbox("Seleccione la camara", [0, 1, 2])
 
-        if st.button("Iniciar captura de rostro"):
-            capture_faces(camera_index) 
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("Iniciar captura de rostro") and not st.session_state.capture_active:
+                st.session_state.capture_active = True
+                start_face_capture(camera_index)
+            
+        with col2:
+            if st.button("Finalizar captura de rostro") and st.session_state.capture_active:
+                st.session_state.capture_active = False
+                st.success("Captura de rostro finalizada")
 
     # search person
     email = st.text_input("Escribe el email de la persona a buscar")
@@ -160,35 +281,64 @@ def register_person(nombre, apellido, email):
         st.error(f"Error al registrar persona: {e}")
         return False
     
-# capture faces (implement logic later)
-def capture_faces(camera_index):
+# capture faces
+def start_face_capture(camera_index):
     st.info("Iniciando captural facial...")
 
-    # TO DO
-    st.warning("WIP - funcion no implementada")
+    try:
 
-    # EXAMPLE
-
-    #  """
-    # cap = cv2.VideoCapture(camera_index)
-    # captured_faces = 0
-    # max_faces = 5
-    
-    # while captured_faces < max_faces:
-    #     ret, frame = cap.read()
-    #     if not ret:
-    #         break
-            
-    #     # Detectar rostros y extraer embeddings
-    #     # Guardar embeddings en la base de datos
-    #     # Mostrar vista previa
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            st.error("Error al abrir la camara")
+            return
         
-    #     captured_faces += 1
-    #     time.sleep(1)
-    
-    # cap.release()
-    # """
+        st.info("Capturando rostro, mire a la camara")
+        placeholder = st.empty()
+        embeddings_captured = 0
+        max_embeddings = 5
 
+        while st.session_state.capture_active and embeddings_captured < max_embeddings:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            rgb_frame = cv2.cvtColor (frame, cv2.COLOR_BGR2RGB)
+            
+            # display frame
+            placeholder.image(rgb_frame, caption="Vista de camara - captura de rostro", use_column_width=True)
+
+            # extract embeddings
+            embedding = st.session_state['system'].extract_embeddings(rgb_frame)
+
+            if embedding is not None:
+                
+                # save embedding
+                cursor = st.session_state['system'].conn.cursor()
+                embedding_blob = pickle.dumps(embedding)
+                cursor.execute("INSERT INTO Rostro (id_persona, rostro) VALUES (?, ?)", (st.session_state.current_person_id, embedding_blob))
+                st.session_state['system'].conn.commit()
+
+                st.session_state.system.persona_embeddings[st.session_state.current_person_id] = embedding
+
+                st.session_state['system'].save_face_embeddings()
+
+                embeddings_captured += 1
+                st.success(f"Embedding {embeddings_captured}/{max_embeddings} capturado exitosamente")
+
+                # short pause betweens caps
+
+                time.sleep(1)
+            
+            time.sleep(0.1)
+
+        cap.release()
+        placeholder.empty()
+
+        if embeddings_captured >= max_embeddings:
+            st.success("Captura de rostros finalizada")
+            st.session_state_capture_active = False
+    except Exception as e:
+        st.error(f"Error al capturar rostros: {e}")
 
 # detection page
 def show_detection_page():
