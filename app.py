@@ -340,6 +340,7 @@ def start_face_capture(camera_index):
     except Exception as e:
         st.error(f"Error al capturar rostros: {e}")
 
+
 # detection page
 def show_detection_page():
      st.title("Deteccion en tiempo real")
@@ -353,51 +354,159 @@ def show_detection_page():
         col_controls = st.columns(3)
         # detection controls
         with col_controls[0]:
-            start_detection = st.button("Iniciar Deteccion")
-        with col_controls[1]:
-            stop_detection = st.button("Detener Deteccion")
-        with col_controls[2]:
             camera_select = st.selectbox("Camara", [0, 1, 2], key="detection_cam")
+        with col_controls[1]:
+            if st.button("Iniciar Detección") and not st.session_state.detection_active:
+                st.session_state.detection_active = True
+                start_real_time_detection(camera_select)
+        with col_controls[2]:
+            if st.button("Detener Detección") and st.session_state.detection_active:
+                st.session_state.detection_active = False  
+                st.success("Detección detenida") 
 
     #placeholder for video
 
         video_placeholder= st.empty()
+        info_placeholder = st.empty()
 
-        if start_detection:
-
-            #TO DO: Implement logic
-
-            st.info("Deteccion iniciada")
-
-            for i in range(10):
-                with video_placeholder.container():
-                    #create AI image using numpy
-                    img = np.random.randint(0, 255, size=(480, 640, 3), dtype=np.uint8)
-
-                    # simulate detection
-                    st.image(img, caption="Vista de cámara en tiempo real", use_column_width=True)
-
-                    # show detection (IMPLEMENT LOGIC)
-                    st.info(f"Persona detectada: Carlos (Confianza: 100%)")
-
-                time.sleep(2)
-
-        if stop_detection:
-            st.warning("Deteccion detenida")
-            video_placeholder.empty()
+        if st.session_state.detection_active:
+            st.session_state.video_placeholder = video_placeholder
+            st.session_state.info_placeholder = info_placeholder
 
      with col2:
         st.subheader("Informacion de Deteccion")
-
-        # placeholder
-        st.info("Esperando deteccion...")
+        display_realtime_info()
 
         # last detection
         st.subheader("Ultima detecciones hechas")
         display_recent_detections()
 
-# display recent detections
+# start real-time detection
+def start_real_time_detection(camera_index):
+    
+    #start on a separate thread
+    def detection_thread():
+        try:
+            cap = cv2.VideoCapture(camera_index)
+            if not cap.isOpened():
+                st.error("Error al abrir la camara")
+                return
+            
+            while st.session_state.detection_active:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                processed_frame, detection_info = process_frame_for_detection(rgb_frame)
+
+                # display frame
+
+                if hasattr(st.session_state, 'video_placeholder'):
+                    st.session_state.video_placeholder.image(
+                        processed_frame,
+                        caption="Deteccion en tiempo real",
+                        use_column_width=True
+                    )
+
+                # update info
+
+                if hasattr(st.session_state, 'info_placeholder'):
+                    with st.session_state.info_placeholder.container():
+                        display_detection_info(detection_info)
+                
+                time.sleep(0.1)
+            
+            cap.release()
+
+        except Exception as e:
+            st.error(f"Error en deteccion en tiempo real: {e}")
+
+# process frame
+def process_frame_for_detection(frame):
+
+    try: 
+        embedding = st.session_state['system'].extract_embeddings(frame)
+        detection_info = {
+            'persona': 'Desconocido',
+            'confianza': 0,
+            'emocion': 'neutral',
+            'emocion_confianza': 0 
+        }
+    
+        if embedding is not None:
+            # identify person
+            person_id , confidence = st.session_state['system'].recognize_face(embedding)
+
+            if person_id:
+
+                cursor = st.session_state.system.conn.cursor()
+                cursor.execute(
+                    "SELECT nombre, apellido FROM Persona WHERE id = ?", (person_id,)
+                )
+                persona_data = cursor.fetchone()
+
+                if persona_data: 
+                    detection_info['persona'] = f"{persona_data[0]} {persona_data[1]}"
+                    detection_info['confianza'] = confidence
+
+                    # detect emotion
+                    emotion, emocion_conf = st.session_state['system'].detect_emotion(frame)
+
+                    detection_info['emocion'] = emotion
+                    detection_info['emocion_confianza'] = emocion_conf
+
+                    # save in sql
+                    save_detection_record(person_id, emotion, emocion_conf)
+    
+        return frame, detection_info
+
+    except Exception as e:
+        st.error(f"Error procesando frame: {e}")
+        return frame, {
+            'persona': 'Error',
+            'confianza': 0,
+            'emocion': 'neutral',
+            'emocion_confianza': 0
+        }
+
+# display detection info
+def display_detection_info(info):
+    """Mostrar información de detección"""
+    st.info(f"**Persona:** {info['persona']}")
+    if info['confianza'] > 0:
+        st.info(f"**Confianza:** {info['confianza']:.2%}")
+    st.info(f"**Emoción:** {info['emocion']}")
+    st.info(f"**Confianza emoción:** {info['emocion_confianza']:.2%}")
+
+# save record
+def save_detection_record(person_id, emotion, confidence):
+
+    try: 
+        cursor= st.session_state['system'].conn.cursor()
+        cursor.execute(
+            "INSERT INTO Deteccion (id_persona, emocion, confianza) VALUES (?, ?, ?)",
+            (person_id, emotion, confidence)
+        )
+        st.session_state['system'].conn.commit()
+    except Exception as e:
+        st.error(f"Error al guardar deteccion: {e}")
+
+# display real time info
+
+def display_realtime_info():
+    """Mostrar información en tiempo real"""
+    if hasattr(st.session_state, 'last_detection'):
+        info = st.session_state.last_detection
+        st.metric("Persona Detectada", info['persona'])
+        st.metric("Confianza", f"{info['confianza']:.2%}")
+        st.metric("Emoción", info['emocion'])
+        st.metric("Confianza Emoción", f"{info['emocion_confianza']:.2%}")
+    else:
+        st.info("Esperando detección...")
+
+# display recent detections
 def display_recent_detections():
     
     try: 
