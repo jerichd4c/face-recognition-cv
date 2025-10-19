@@ -1,5 +1,6 @@
 # libraries
 
+from datetime import datetime
 import sqlite3
 import streamlit as st
 import os
@@ -11,6 +12,7 @@ import plotly.express as px
 from deepface import DeepFace
 from sklearn.metrics.pairwise import cosine_similarity
 import cv2
+import threading
 
 # initial page config
 st.set_page_config(
@@ -422,6 +424,11 @@ def start_real_time_detection(camera_index):
 
         except Exception as e:
             st.error(f"Error en deteccion en tiempo real: {e}")
+    
+    # start thread
+    thread = threading.Thread(target=detection_thread)
+    thread.daemon = True
+    thread.start()
 
 # process frame
 def process_frame_for_detection(frame):
@@ -581,82 +588,189 @@ def show_reports_page():
 def show_emotion_charts():
     st.subheader("Distribucion de emociones")
 
-    # mock data
+    try: 
+        cursor = st.session_state['system'].conn.cursor()  
 
-    emotions_data = {
-        'Persona': ['Juan Pérez', 'María García', 'Carlos López', 'Ana Martínez'],
-        'Feliz': [45, 30, 25, 40],
-        'Triste': [15, 25, 30, 20],
-        'Enojado': [10, 15, 20, 5],
-        'Sorprendido': [20, 20, 15, 25],
-        'Neutral': [10, 10, 10, 10]
-    }
+        # obtain data from table
+        cursor.execute("""
+            SELECT P.nombre || ' ' || P.apellido as persona,
+                   D.emocion,
+                   COUNT(*) as conteo
+            FROM Deteccion D
+            JOIN Persona P ON D.id_persona = P.id
+            GROUP BY persona, emocion
+        """)
 
-    df= pd.DataFrame(emotions_data)
+        data = cursor.fetchall()
 
-    fig = px.bar(df, x='Persona', y=['Feliz', 'Triste', 'Enojado', 'Sorprendido', 'Neutral'],
-                 title="Distribucion de emociones por persona",
-                 labels={"value": "Porcentaje", "variable": "Emocion" })
+        if data:
 
-    st.plotly_chart(fig, use_container_width=True)
+            df_data = []
+            for row in data:
+                df_data.append({
+                    "Persona": row[0],
+                    "Emocion": row[1],
+                    "Conteo": row[2]
+                })
+            df = pd.DataFrame(df_data)
+
+            # emotion graph
+            fig = px.bar(df, x='Persona', y='Cantidad', color='Emoción',
+                        title='Distribución de Emociones por Persona')
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No hay datos de detecciones para mostrar")
+    except Exception as e:
+        st.error(f"Error al generar grafico de emociones: {e}")
 
 # general stats
 def show_general_stats():
     st.subheader("Estadisticas generales")
 
-    col1 , col2, col3, col4 = st.columns(4)
+    try:
 
-    # example 
+        cursor = st.session_state['system'].conn.cursor()
 
-    with col1:
-        st.metric("Total de personas registradas", "25")
-    with col2:
-        st.metric("Total de detecciones realizadas", "156")
-    with col3:
-        st.metric("Emocion predominante", "Feliz")
-    with col4:
-        st.metric("Porcentaje de emociones", "94.2%")
-    
-    # detection graph per hour
+        col1 , col2, col3, col4 = st.columns(4)
 
-    st.subheader("Detecciones por hora")
-    hours = list(range(24))
-    detections = [5, 3, 2, 1, 1, 2, 8, 15, 20, 18, 16, 14, 16, 15, 12, 10, 8, 12, 15, 14, 10, 8, 6, 4]
+        # registered persons
+        cursor.execute("SELECT COUNT(*) FROM personas")
+        total_personas = cursor.fetchone()[0]
 
-    fig = px.line(x=hours, y=detections, title='Patrón de Detecciones por Hora',
-                  labels={'x': 'Hora del día', 'y': 'Número de detecciones'})
-    st.plotly_chart(fig, use_container_width=True)
+        # detections today
+        cursor.execute("SELECT COUNT(*) FROM detecciones WHERE DATE(timestamp) = DATE('now')")
+        detecciones_hoy = cursor.fetchone()[0]  
+
+        # most common emotion
+        cursor.execute("""
+            SELECT emocion, COUNT(*) as count 
+            FROM detecciones 
+            GROUP BY emocion 
+            ORDER BY count DESC 
+            LIMIT 1
+        """)
+        emocion_data = cursor.fetchone()
+        emocion_predominante = emocion_data[0] if emocion_data else "N/A"
+
+        # recognition rate (estimated)
+        cursor.execute("SELECT COUNT(*) FROM detecciones WHERE confianza > 0.7")
+        reconocimientos_confiables = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM detecciones")
+        total_detecciones = cursor.fetchone()[0]
+        
+        tasa_reconocimiento = (reconocimientos_confiables / total_detecciones * 100) if total_detecciones > 0 else 0
+
+        # metrics
+
+        with col1:
+            st.metric("Total de personas registradas", total_personas)
+        with col2:
+            st.metric("Total de detecciones realizadas", detecciones_hoy)
+        with col3:
+            st.metric("Emocion predominante", emocion_predominante)
+        with col4:
+            st.metric("Porcentaje de emociones", f"{tasa_reconocimiento:.1f}%")
+
+        # query for detections per hour
+
+        st.subheader("Patrón de detecciones por hora")
+        cursor.execute("""
+            SELECT STRFTIME('%H', timestamp) as hora, COUNT(*) as count
+            FROM Deteccion
+            GROUP BY hora
+            ORDER BY hora
+        """)
+
+        # detection graph per hour
+
+        hora_data = cursor.fetchall()
+        if hora_data:
+            horas = [f"{int(h[0]):02d}:00" for h in hora_data]
+            counts = [h[1] for h in hora_data]
+
+
+            fig = px.line(x=horas, y=counts, title='Patrón de Detecciones por Hora',
+                        labels={'x': 'Hora del día', 'y': 'Número de detecciones'})
+            st.plotly_chart(fig, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Error al mostrar estadisticas generales: {e}")
 
 # history
 def show_detection_history():
     st.subheader("Historial de detecciones")
     
-    # filters
-    col1, col2, col3 =st.columns(3)
+    try:
 
-    with col1:
-        date_filter = st.date_input("Filtrar por fecha")
-    with col2:
-        person_filter = st.selectbox("Filtrar por persona", ["Todas", "Juan Pérez", "María García", "Carlos López"])
-    with col3:
-        emotion_filter = st.selectbox("Filtrar por emoción", ["Todas", "Feliz", "Triste", "Enojado", "Sorprendido"])
-    
-    # save button CSV file
+        # filters
+        col1, col2, col3 =st.columns(3)
 
-    if st.button("Guardar reporte en CSV"):
-        st.success("Reporte guardado exitosamente (TO DO)")
+        with col1:
+            date_filter = st.date_input("Filtrar por fecha")
+        with col2:
+            cursor = st.session_state.system.conn.cursor()
+            cursor.execute("SELECT id, nombre || ' ' || apellido FROM personas")
+            personas = cursor.fetchall()
+            persona_options = ["Todas"] + [p[1] for p in personas]
+            person_filter = st.selectbox("Filtrar por persona", persona_options)
+        with col3:
+            emotion_options = ["Todas", "feliz", "triste", "enojado", "sorprendido", "miedo", "desagrado", "neutral"]
+            emotion_filter = st.selectbox("Filtrar por emoción", emotion_options)
+        
+        # build querys
 
-    # detection table (mock data)
+        query = """"
+            SELECT D.timestamp, P.nombre, P.apellido, D.emocion, D.confianza
+            FROM Deteccion D
+            JOIN Persona P ON D.id_persona = P.id
+            WHERE 1=1
+        """
 
-    detection_data = {
-        'Fecha/Hora': ['2024-01-15 08:30:15', '2024-01-15 09:15:22', '2024-01-15 10:05:47'],
-        'Persona': ['Juan Pérez', 'María García', 'Carlos López'],
-        'Emoción': ['Feliz', 'Neutral', 'Sorprendido'],
-        'Confianza': ['95.2%', '88.7%', '92.1%']
-    }
-    
-    df = pd.DataFrame(detection_data)
-    st.dataframe(df, use_container_width=True)
+        params = []
+
+        # apply filters
+
+        if date_filter:
+                query += " AND DATE(d.timestamp) = ?"
+                params.append(date_filter.strftime('%Y-%m-%d'))
+            
+        if person_filter != "Todas":
+                query += " AND p.nombre || ' ' || p.apellido = ?"
+                params.append(person_filter)
+            
+        if emotion_filter != "Todas":
+                query += " AND d.emocion = ?"
+                params.append(emotion_filter)
+            
+        query += " ORDER BY d.timestamp DESC"
+
+        cursor = st.session_state.system.conn.cursor()
+        cursor.execute(query, params)
+        detections = cursor.fetchall()
+
+        # display data
+
+        if detections:
+            df = pd.DataFrame(detections, columns=['Fecha/Hora', 'Nombre', 'Apellido', 'Emoción', 'Confianza'])
+
+            df['Confianza'] = df['Confianza'].apply(lambda x: f"{x*100:.1%}")
+            st.dataframe(df, use_container_width=True)
+
+        # save button CSV file
+
+        if st.button("Guardar reporte en CSV"):
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="Descargar CSV",
+                data=csv,
+                file_name=f"detecciones_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        else: 
+            st.info("No hay datos para mostrar con los filtros seleccionados")
+
+    except Exception as e:
+        st.error(f"Error al mostrar historial de detecciones: {e}")
 
 if __name__ == "__main__":
     main()
