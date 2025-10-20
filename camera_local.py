@@ -55,6 +55,18 @@ def init_database(conn):
         )
         """
     )
+    # Detalle de emociones por detección (distribución completa)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS DeteccionEmocionDetalle (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_deteccion INTEGER NOT NULL,
+            emocion TEXT NOT NULL,
+            confianza REAL NOT NULL,
+            FOREIGN KEY (id_deteccion) REFERENCES Deteccion (id)
+        )
+        """
+    )
     conn.commit()
 
 
@@ -102,6 +114,31 @@ def analyze_emotion(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[str, 
         return 'neutral', 0.0
     except Exception:
         return 'neutral', 0.0
+
+
+def analyze_emotion_full(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[str, float, dict[str, float]]:
+    """Return dominant emotion, its confidence, and full distribution (0..1 floats)."""
+    try:
+        if image_rgb is not None and image_rgb.ndim == 3:
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        else:
+            image_bgr = image_rgb
+        ana = DeepFace.analyze(
+            img_path=image_bgr,
+            actions=['emotion'],
+            enforce_detection=False if backend == 'skip' else True,
+            detector_backend=backend
+        )
+        if ana:
+            dist_percent = ana[0]['emotion']  # values 0..100
+            # Convert to 0..1 floats
+            dist = {k: float(v)/100.0 for k, v in dist_percent.items()}
+            emotion = ana[0]['dominant_emotion']
+            conf = float(dist.get(emotion, 0.0))
+            return emotion, conf, dist
+        return 'neutral', 0.0, {k: 0.0 for k in ['angry','disgust','fear','happy','sad','surprise','neutral']}
+    except Exception:
+        return 'neutral', 0.0, {k: 0.0 for k in ['angry','disgust','fear','happy','sad','surprise','neutral']}
 
 
 def load_person_embeddings(conn) -> dict[int, list[np.ndarray]]:
@@ -357,7 +394,7 @@ def detection_mode(args):
                         emo_face = face_rgb
                         if args.emotion_scale and args.emotion_scale != 1.0:
                             emo_face = cv2.resize(face_rgb, (0, 0), fx=args.emotion_scale, fy=args.emotion_scale)
-                        e_label, e_conf = analyze_emotion(emo_face, backend=args.emotion_backend)
+                        e_label, e_conf, e_dist = analyze_emotion_full(emo_face, backend=args.emotion_backend)
                         emotion, emo_conf = e_label, float(e_conf)
                         last_emo_ts = now
                     # Save detection whenever we computed any of the two signals
@@ -366,6 +403,17 @@ def detection_mode(args):
                             "INSERT INTO Deteccion(id_persona, recog_confianza, emocion, emocion_confianza, timestamp) VALUES(?,?,?,?,?)",
                             (pid, recog_conf if pid is not None else None, emotion if emotion is not None else 'neutral', emo_conf if emo_conf is not None else 0.0, datetime.now())
                         )
+                        det_id = cur_thr.lastrowid
+                        # Persist full distribution if available
+                        try:
+                            if 'e_dist' in locals():
+                                for emo, confv in e_dist.items():
+                                    cur_thr.execute(
+                                        "INSERT INTO DeteccionEmocionDetalle(id_deteccion, emocion, confianza) VALUES(?,?,?)",
+                                        (det_id, emo, float(confv))
+                                    )
+                        except Exception:
+                            pass
                         conn_thr.commit()
                 # Publish results
                 with result_lock:
