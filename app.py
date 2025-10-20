@@ -60,57 +60,140 @@ class FacialRecognitionSystem():
         """)
         print("Tabla rostro creada")
 
-        # Detection table
+        # Detection table (v2 schema with separated confidences and nullable id_persona)
+        # Desired schema:
+        # Deteccion(
+        #   id INTEGER PK,
+        #   id_persona INTEGER NULL,
+        #   recog_confianza REAL NULL,
+        #   emocion TEXT NOT NULL,
+        #   emocion_confianza REAL NOT NULL,
+        #   timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        #   FOREIGN KEY(id_persona) REFERENCES Persona(id)
+        # )
 
+        # Create initial table if it does not exist at all
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Deteccion (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_persona INTEGER NOT NULL,
+                id_persona INTEGER,
+                recog_confianza REAL,
                 emocion TEXT NOT NULL,
-                confianza REAL NOT NULL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+                emocion_confianza REAL NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (id_persona) REFERENCES Persona (id)
             )
         """)
-        print("Tabla deteccion creada")
+        print("Tabla deteccion creada o actualizada")
+
+        # Migration path from legacy schema if needed
+        try:
+            cursor.execute("PRAGMA table_info(Deteccion)")
+            cols = cursor.fetchall()
+            col_names = [c[1] for c in cols]
+
+            legacy_cols = {"id", "id_persona", "emocion", "confianza", "timestamp"}
+            desired_cols = {"id", "id_persona", "recog_confianza", "emocion", "emocion_confianza", "timestamp"}
+
+            # If table still has legacy layout, migrate
+            if set(col_names) == legacy_cols:
+                print("Migrando tabla Deteccion a nuevo esquema...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS Deteccion_v2 (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        id_persona INTEGER,
+                        recog_confianza REAL,
+                        emocion TEXT NOT NULL,
+                        emocion_confianza REAL NOT NULL,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (id_persona) REFERENCES Persona (id)
+                    )
+                """)
+                # Move data: legacy 'confianza' corresponds to 'emocion_confianza'; recog_confianza unknown -> NULL
+                cursor.execute("""
+                    INSERT INTO Deteccion_v2 (id_persona, recog_confianza, emocion, emocion_confianza, timestamp)
+                    SELECT id_persona, NULL as recog_confianza, emocion, confianza as emocion_confianza, timestamp FROM Deteccion
+                """)
+                cursor.execute("DROP TABLE Deteccion")
+                cursor.execute("ALTER TABLE Deteccion_v2 RENAME TO Deteccion")
+                print("Migración de Deteccion completada")
+            else:
+                # Ensure desired columns exist; if missing, perform additive migration
+                needs_additive = False
+                if "recog_confianza" not in col_names:
+                    cursor.execute("ALTER TABLE Deteccion ADD COLUMN recog_confianza REAL")
+                    needs_additive = True
+                if "emocion_confianza" not in col_names:
+                    cursor.execute("ALTER TABLE Deteccion ADD COLUMN emocion_confianza REAL NOT NULL DEFAULT 0.0")
+                    needs_additive = True
+                # Allow id_persona to be NULL is already satisfied in SQLite if defined without NOT NULL
+                if needs_additive:
+                    print("Esquema Deteccion actualizado con columnas adicionales")
+        except Exception as e:
+            print(f"Aviso: no se pudo verificar/migrar esquema de Deteccion: {e}")
 
         self.conn.commit()
         cursor.close()
-        print( "Tablas creadas")
+        print("Tablas listas")
 
     # load facial recognition and embedding model
 
     def load_face_models(self):
 
-        try:
-            if os.path.exists('face_embeddings.pk1'):
-                with open('face_embeddings.pk1', 'rb') as f:
-                    self.face_embeddings = pickle.load(f)
-            else:
-                self.face_embeddings = {}
+        # Helper: normalize embeddings to unit length
+        def _normalize(v):
+            try:
+                v = np.asarray(v, dtype=np.float32)
+                n = np.linalg.norm(v)
+                if n > 0:
+                    return (v / n).astype(np.float32)
+                return v.astype(np.float32)
+            except Exception:
+                return np.asarray(v, dtype=np.float32)
 
-            if os.path.exists("persona_embeddings.pk1"):
-                with open("persona_embeddings.pk1", "rb") as f:
-                    self.persona_embeddings = pickle.load(f)
-            else:
-                self.persona_embeddings = {}
+        try:
+            # Build in-memory embeddings from DB (preferred source of truth)
+            self.persona_embeddings = {}
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id_persona, rostro FROM Rostro")
+            rows = cursor.fetchall()
+            for pid, blob in rows:
+                try:
+                    emb = pickle.loads(blob)
+                    emb = _normalize(emb)
+                    self.persona_embeddings.setdefault(pid, []).append(emb)
+                except Exception:
+                    continue
+            cursor.close()
+
+            # Legacy pickle fallback (if DB empty and pickle exists)
+            if not self.persona_embeddings and os.path.exists("persona_embeddings.pk1"):
+                try:
+                    with open("persona_embeddings.pk1", "rb") as f:
+                        legacy = pickle.load(f)
+                    # Accept dict of id -> emb or id -> [emb]
+                    for pid, val in legacy.items():
+                        if isinstance(val, (list, tuple)):
+                            self.persona_embeddings[pid] = [_normalize(v) for v in val]
+                        else:
+                            self.persona_embeddings[pid] = [_normalize(val)]
+                except Exception:
+                    pass
+
+            # Maintain a separate container for potential future use; not used directly
+            self.face_embeddings = {}
 
         except Exception as e:
             st.error(f"Error al cargar modelos de reconocimiento facial: {e}")
-            self.known_embeddings = {}
             self.persona_embeddings = {}
 
     # save face embeddings
 
     def save_face_embeddings(self):
-
-        try: 
-            with open('face_embeddings.pk1', 'wb') as f:
-                pickle.dump(self.face_embeddings, f)
-
+        # Optional: persist in-memory cache to a pickle for warm start
+        try:
             with open('persona_embeddings.pk1', 'wb') as f:
                 pickle.dump(self.persona_embeddings, f)
-
         except Exception as e:
             st.error(f"Error al guardar embeddings: {e}")
 
@@ -127,7 +210,12 @@ class FacialRecognitionSystem():
                 detector_backend = 'opencv'
             )
             if result:
-                return result[0]["embedding"]
+                # Normalize embedding for stable similarity metrics
+                emb = np.asarray(result[0]["embedding"], dtype=np.float32)
+                n = np.linalg.norm(emb)
+                if n > 0:
+                    emb = emb / n
+                return emb.astype(np.float32)
             return None
         except Exception as e:
             st.error(f"Error al extraer embeddings: {e}")
@@ -155,27 +243,42 @@ class FacialRecognitionSystem():
     
     # recognize face
 
-    def recognize_face(self, embedding, threshold=0.6): 
+    def recognize_face(self, embedding, threshold=0.6):
 
-        try: 
+        try:
+            if embedding is None or not self.persona_embeddings:
+                return None, 0.0
+
+            # Ensure input normalized
+            emb = np.asarray(embedding, dtype=np.float32)
+            n = np.linalg.norm(emb)
+            if n > 0:
+                emb = emb / n
+
             best_match = None
-            best_score = 0
+            best_score = 0.0
 
-            for person_id, stored_embedding in self.persona_embeddings.items():
-                
-                # calc similarity
+            for person_id, stored_embeddings in self.persona_embeddings.items():
+                if not stored_embeddings:
+                    continue
+                # Compute max cosine similarity against all embeddings for this person
+                try:
+                    sims = [cosine_similarity([emb], [se])[0][0] for se in stored_embeddings]
+                    person_score = max(sims) if sims else 0.0
+                except Exception:
+                    # Fallback manual dot since vectors are normalized
+                    sims = [float(np.dot(emb, se)) for se in stored_embeddings]
+                    person_score = max(sims) if sims else 0.0
 
-                similarity = cosine_similarity([embedding], [stored_embedding])[0][0]
-
-                if similarity > best_score and similarity > threshold:
-                    best_score = similarity
+                if person_score > best_score and person_score >= threshold:
+                    best_score = person_score
                     best_match = person_id
 
-            return best_match, best_score
+            return best_match, float(best_score)
 
         except Exception as e:
             st.error(f"Error al reconocer rostro: {e}")
-            return None, 0 
+            return None, 0.0
 
     def get_all_persons(self):
         """Get all registered persons"""
@@ -215,6 +318,8 @@ if 'last_frame' not in st.session_state:
     st.session_state.last_frame = None
 if 'last_detection' not in st.session_state:
     st.session_state.last_detection = None
+if 'recog_threshold' not in st.session_state:
+    st.session_state.recog_threshold = 0.6
 
 def main():
     st.sidebar.title("Sistema de Reconocimiento Facial")
@@ -283,7 +388,7 @@ def show_registration_page():
         st.info(f"Persona actual: **{persona_nombre}**")
         st.info(f"Embeddings capturados: **{st.session_state.captured_embeddings}/5**")
 
-        # camera selection
+    # camera selection
         camera_index = st.selectbox("Seleccionar cámara", [0, 1, 2], key="capture_cam")
 
         # start/Stop preview buttons
@@ -362,7 +467,7 @@ def capture_current_frame():
         embedding = st.session_state.system.extract_embeddings(st.session_state.last_frame)
 
         if embedding is not None:
-            # store embedding in database
+            # store embedding in database (normalized already)
             cursor = st.session_state.system.conn.cursor()
             embedding_blob = pickle.dumps(embedding)
             cursor.execute(
@@ -371,8 +476,8 @@ def capture_current_frame():
             )
             st.session_state.system.conn.commit()
 
-            # update in-memory embeddings
-            st.session_state.system.persona_embeddings[st.session_state.current_person_id] = embedding
+            # update in-memory embeddings list
+            st.session_state.system.persona_embeddings.setdefault(st.session_state.current_person_id, []).append(embedding)
             st.session_state.system.save_face_embeddings()
 
             st.session_state.captured_embeddings += 1
@@ -432,7 +537,7 @@ def show_detection_page():
         st.subheader("Vista de camara")
 
         # detection controls
-        col_controls = st.columns(3)
+        col_controls = st.columns([1,1,1,2])
         with col_controls[0]:
             camera_select = st.selectbox("Camara", [0, 1, 2], key="detection_cam")
         with col_controls[1]:
@@ -446,6 +551,18 @@ def show_detection_page():
                 st.session_state.last_detection = None
                 st.success("Detección detenida")
                 st.rerun()
+        with col_controls[3]:
+            st.slider(
+                "Umbral de reconocimiento (similitud coseno)",
+                min_value=0.3,
+                max_value=0.9,
+                value=float(st.session_state.recog_threshold),
+                step=0.01,
+                key="recog_threshold_slider",
+                help="A mayor umbral, más estricto el reconocimiento. 0.6–0.7 suele ser razonable."
+            )
+            # Sync slider to session
+            st.session_state.recog_threshold = float(st.session_state.get("recog_threshold_slider", 0.6))
 
         # show real-time detection if active
         if st.session_state.detection_active:
@@ -507,7 +624,8 @@ def process_frame_for_detection(frame):
     
         if embedding is not None:
             # identify person
-            person_id , confidence = st.session_state.system.recognize_face(embedding)
+            threshold = float(st.session_state.get('recog_threshold', 0.6))
+            person_id , confidence = st.session_state.system.recognize_face(embedding, threshold=threshold)
 
             if person_id:
 
@@ -527,13 +645,15 @@ def process_frame_for_detection(frame):
                     detection_info['emocion'] = emotion
                     detection_info['emocion_confianza'] = emocion_conf
 
-                    # save in sql
-                    save_detection_record(person_id, emotion, emocion_conf)
+                    # save in sql with both confidences
+                    save_detection_record(person_id, confidence, emotion, emocion_conf)
             else:
                 # person not recognized but analyze emotion
                 emotion, emocion_conf = st.session_state.system.analyze_emotions(frame)
                 detection_info['emocion'] = emotion
                 detection_info['emocion_confianza'] = emocion_conf
+                # Save detection with NULL person and recog_confianza NULL
+                save_detection_record(None, None, emotion, emocion_conf)
     
         return frame, detection_info
 
@@ -558,13 +678,13 @@ def display_detection_info(info):
     st.info(f"**Hora:** {info['timestamp'].strftime('%H:%M:%S')}")
 
 # save record
-def save_detection_record(person_id, emotion, confidence):
+def save_detection_record(person_id, recog_conf, emotion, emotion_conf):
 
-    try: 
+    try:
         cursor = st.session_state.system.conn.cursor()
         cursor.execute(
-            "INSERT INTO Deteccion (id_persona, emocion, confianza) VALUES (?, ?, ?)",
-            (person_id, emotion, confidence)
+            "INSERT INTO Deteccion (id_persona, recog_confianza, emocion, emocion_confianza) VALUES (?, ?, ?, ?)",
+            (person_id, recog_conf, emotion, emotion_conf)
         )
         st.session_state.system.conn.commit()
     except Exception as e:
@@ -596,7 +716,7 @@ def display_recent_detections():
         cursor.execute("""
             SELECT COALESCE(P.nombre, 'Desconocido') as nombre,
                    COALESCE(P.apellido, '') as apellido,
-                   D.emocion, D.confianza, D.timestamp
+                   D.emocion, D.emocion_confianza, D.recog_confianza, D.timestamp
             FROM Deteccion D
             LEFT JOIN Persona P ON D.id_persona = P.id
             ORDER BY D.timestamp DESC
@@ -610,27 +730,15 @@ def display_recent_detections():
                 nombre = det[0] or "Desconocido"
                 apellido = det[1] or ""
                 emocion = det[2] or "Desconocida"
-                confianza = det[3]
-                # normalize confidence: allow both 0-1 and 0-100 ranges
-                conf_percent = None
-                try:
-                    conf_val = float(confianza)
-                    if conf_val <= 1.0:
-                        conf_percent = conf_val * 100
-                    else:
-                        # assume value already in percentage-scale (0-100)
-                        conf_percent = conf_val
-                except Exception:
-                    conf_percent = None
-
-                timestamp = det[4]
+                emocion_conf = det[3]
+                recog_conf = det[4]
+                timestamp = det[5]
 
                 with st.container():
                     st.write(f"**{nombre} {apellido}**")
-                    if conf_percent is not None:
-                        st.write(f"Emoción: {emocion} ({conf_percent:.1f}%)")
-                    else:
-                        st.write(f"Emoción: {emocion} (confianza: {confianza})")
+                    st.write(f"Emoción: {emocion} ({(emocion_conf or 0)*100:.1f}%)")
+                    if recog_conf is not None:
+                        st.write(f"Conf. reconocimiento: {(recog_conf or 0)*100:.1f}%")
                     st.write(f"Hora: {timestamp}")
                     st.divider()
 
@@ -668,11 +776,11 @@ def show_emotion_charts():
 
         # obtain data from table
         cursor.execute("""
-            SELECT P.nombre || ' ' || P.apellido as persona,
+            SELECT COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
                    D.emocion,
                    COUNT(*) as conteo
             FROM Deteccion D
-            JOIN Persona P ON D.id_persona = P.id
+            LEFT JOIN Persona P ON D.id_persona = P.id
             GROUP BY persona, emocion
         """)
 
@@ -715,7 +823,7 @@ def show_general_stats():
 
         # detections today
         cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE DATE(timestamp) = DATE('now')")
-        detecciones_hoy = cursor.fetchone()[0]  
+        detecciones_hoy = cursor.fetchone()[0]
 
         # most common emotion
         cursor.execute("""
@@ -728,24 +836,23 @@ def show_general_stats():
         emocion_data = cursor.fetchone()
         emocion_predominante = emocion_data[0] if emocion_data else "N/A"
 
-        # recognition rate (estimated)
-        cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE confianza > 0.7")
+        # recognition rate (estimated) using recog_confianza
+        cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE recog_confianza IS NOT NULL AND recog_confianza > 0.7")
         reconocimientos_confiables = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM Deteccion")
-        total_detecciones = cursor.fetchone()[0]
-        
-        tasa_reconocimiento = (reconocimientos_confiables / total_detecciones * 100) if total_detecciones > 0 else 0
+        cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE recog_confianza IS NOT NULL")
+        total_reconocimientos = cursor.fetchone()[0]
+        tasa_reconocimiento = (reconocimientos_confiables / total_reconocimientos * 100) if total_reconocimientos > 0 else 0
 
         # metrics
 
         with col1:
             st.metric("Total de personas registradas", total_personas)
         with col2:
-            st.metric("Total de detecciones realizadas", detecciones_hoy)
+            st.metric("Detecciones realizadas (hoy)", detecciones_hoy)
         with col3:
             st.metric("Emocion predominante", emocion_predominante)
         with col4:
-            st.metric("Porcentaje de emociones", f"{tasa_reconocimiento:.1f}%")
+            st.metric("Tasa de reconocimientos confiables", f"{tasa_reconocimiento:.1f}%")
 
         # query for detections per hour
 
@@ -775,11 +882,9 @@ def show_general_stats():
 # history
 def show_detection_history():
     st.subheader("Historial de detecciones")
-    
     try:
-
         # filters
-        col1, col2, col3 =st.columns(3)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             date_filter = st.date_input("Filtrar por fecha")
@@ -792,32 +897,29 @@ def show_detection_history():
         with col3:
             emotion_options = ["Todas", "happy", "sad", "angry", "surprise", "fear", "disgust", "neutral"]
             emotion_filter = st.selectbox("Filtrar por emoción", emotion_options)
-        
-        # build querys
 
+        # build query
         query = """
-            SELECT D.timestamp, P.nombre, P.apellido, D.emocion, D.confianza
+            SELECT D.timestamp, P.nombre, P.apellido, D.emocion, D.emocion_confianza, D.recog_confianza
             FROM Deteccion D
-            JOIN Persona P ON D.id_persona = P.id
+            LEFT JOIN Persona P ON D.id_persona = P.id
             WHERE 1=1
         """
-
         params = []
 
         # apply filters
-
         if date_filter:
-                query += " AND DATE(D.timestamp) = ?"
-                params.append(date_filter.strftime('%Y-%m-%d'))
-            
+            query += " AND DATE(D.timestamp) = ?"
+            params.append(date_filter.strftime('%Y-%m-%d'))
+
         if person_filter != "Todas":
-                query += " AND P.nombre || ' ' || P.apellido = ?"
-                params.append(person_filter)
-            
+            query += " AND P.nombre || ' ' || P.apellido = ?"
+            params.append(person_filter)
+
         if emotion_filter != "Todas":
-                query += " AND D.emocion = ?"
-                params.append(emotion_filter)
-            
+            query += " AND D.emocion = ?"
+            params.append(emotion_filter)
+
         query += " ORDER BY D.timestamp DESC"
 
         cursor = st.session_state.system.conn.cursor()
@@ -825,27 +927,21 @@ def show_detection_history():
         detections = cursor.fetchall()
 
         # display data
-
         if detections:
-            df = pd.DataFrame(detections, columns=['Fecha/Hora', 'Nombre', 'Apellido', 'Emoción', 'Confianza'])
+            df = pd.DataFrame(detections, columns=['Fecha/Hora', 'Nombre', 'Apellido', 'Emoción', 'Conf. Emoción', 'Conf. Reconocimiento'])
 
-            # normalize confidence values (allow both 0-1 and 0-100 scales)
-            def fmt_conf(x):
+            def fmt_pct(x):
                 try:
-                    v = float(x)
-                    if v <= 1.0:
-                        return f"{v*100:.1f}%"
-                    else:
-                        return f"{v:.1f}%"
+                    v = float(x) if x is not None else 0.0
+                    return f"{v*100:.1f}%"
                 except Exception:
-                    return str(x)
+                    return ""
 
-            df['Confianza'] = df['Confianza'].apply(fmt_conf)
+            df['Conf. Emoción'] = df['Conf. Emoción'].apply(fmt_pct)
+            df['Conf. Reconocimiento'] = df['Conf. Reconocimiento'].apply(lambda x: fmt_pct(x) if x is not None else "")
             st.dataframe(df, use_container_width=True)
 
-        # save button CSV file
-
-        if detections:
+            # save button CSV file
             if st.button("Guardar reporte en CSV"):
                 csv = df.to_csv(index=False)
                 st.download_button(
