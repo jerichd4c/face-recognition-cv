@@ -14,6 +14,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 DB_PATH = 'facial_recognition.db'
+_WARNED_DNN_MISSING = False
 
 
 def init_database(conn):
@@ -84,7 +85,7 @@ def extract_embedding(image_rgb: np.ndarray, model_name: str = "ArcFace") -> np.
             img_path=image_rgb,
             model_name=model_name,
             enforce_detection=False,
-            detector_backend='opencv'
+            detector_backend='skip'
         )
         if rep:
             emb = normalize(np.asarray(rep[0]["embedding"], dtype=np.float32))
@@ -123,11 +124,12 @@ def analyze_emotion_full(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[
             image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         else:
             image_bgr = image_rgb
+        # ROI ya está recortado; evitamos re-detección para mayor estabilidad
         ana = DeepFace.analyze(
             img_path=image_bgr,
             actions=['emotion'],
-            enforce_detection=False if backend == 'skip' else True,
-            detector_backend=backend
+            enforce_detection=False,
+            detector_backend='skip'
         )
         if ana:
             dist_percent = ana[0]['emotion']  # values 0..100
@@ -214,8 +216,11 @@ def detect_largest_face(frame_bgr: np.ndarray, gray: np.ndarray, backend: str, c
                 pass  # fall back to opencv
         # If opencv-dnn requested but not available, note it
         if backend == 'opencv-dnn' and dnn_net is None:
-            # Only print occasionally
-            print("[WARN] opencv-dnn backend seleccionado pero modelo Caffe no encontrado en ./models; usando Haar cascade.")
+            # Only print once
+            global _WARNED_DNN_MISSING
+            if not _WARNED_DNN_MISSING:
+                print("[WARN] opencv-dnn backend seleccionado pero modelo Caffe no encontrado en ./models; usando Haar cascade.")
+                _WARNED_DNN_MISSING = True
         # Default: OpenCV Haar cascade
         ds = float(detect_scale) if 0.2 <= detect_scale <= 1.0 else 0.5
         small = cv2.resize(gray, (0, 0), fx=ds, fy=ds)
