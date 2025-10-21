@@ -218,7 +218,7 @@ def main():
     page = st.sidebar.radio(
         "Navegación",
         options=["Registro", "Detección", "Reportes"],
-        index=2,
+        index=0,
         help="Selecciona una sección"
     )
 
@@ -470,10 +470,10 @@ def show_detection_page():
         infer_ms = st.slider("Intervalo inferencia (ms)", 100, 2000, 500, 50)
         detect_scale = st.slider("Escala detección rostro", 0.2, 1.0, 0.5, 0.05)
         infer_scale = st.slider("Escala de inferencia (rostro)", 0.3, 1.0, 0.5, 0.05)
-        detector_backend = st.selectbox("Detector de rostro (caja verde)", options=['opencv','opencv-dnn','retinaface','mediapipe'], index=1)
-        embed_model = st.selectbox("Modelo de embeddings", options=['ArcFace','Facenet','VGG-Face'], index=0)
+        detector_backend = st.selectbox("Detector de rostro (caja verde)", options=['opencv','opencv-dnn','retinaface','mediapipe'], index=0)
+        embed_model = st.selectbox("Modelo de embeddings", options=['ArcFace','Facenet','VGG-Face'], index=1)
     with c2:
-        emo_backend = st.selectbox("Backend emociones (DeepFace)", options=['opencv','retinaface','mediapipe','skip'], index=1)
+        emo_backend = st.selectbox("Backend emociones (DeepFace)", options=['opencv','retinaface','mediapipe','skip'], index=0)
         emo_ms = st.slider("Intervalo emociones (ms)", 500, 10000, 3000, 50)
         crop_padding = st.slider("Padding recorte emociones", 0.0, 0.3, 0.15, 0.01)
         emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)

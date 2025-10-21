@@ -80,7 +80,7 @@ def normalize(v: np.ndarray) -> np.ndarray:
     return v.astype(np.float32)
 
 
-def extract_embedding(image_rgb: np.ndarray, model_name: str = "ArcFace") -> np.ndarray | None:
+def extract_embedding(image_rgb: np.ndarray, model_name: str = "Facenet") -> np.ndarray | None:
     try:
         rep = DeepFace.represent(
             img_path=image_rgb,
@@ -679,7 +679,7 @@ def main():
     pd.add_argument('--crop-padding', type=float, default=0.15, help='Padding adicional alrededor del rostro para emociones (0-0.3)')
     # New advanced options
     pd.add_argument('--detector-backend', type=str, default='opencv', choices=['opencv','opencv-dnn','retinaface','mediapipe'], help='Detector de rostro para el recorte principal')
-    pd.add_argument('--embed-model', type=str, default='ArcFace', choices=['ArcFace','Facenet','VGG-Face'], help='Modelo de embeddings para reconocimiento')
+    pd.add_argument('--embed-model', type=str, default='Facenet', choices=['ArcFace','Facenet','VGG-Face'], help='Modelo de embeddings para reconocimiento')
     pd.add_argument('--emo-smooth-frames', type=int, default=5, help='Ventana de suavizado temporal para emociones (frames)')
     pd.add_argument('--force-mjpg', action='store_true', help='Forzar formato MJPG en la camara para bajar latencia CPU')
     pd.add_argument('--target-fps', type=float, default=0.0, help='Intentar fijar FPS objetivo de la camara (puede no tener efecto)')
