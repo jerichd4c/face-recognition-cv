@@ -277,24 +277,32 @@ def show_general_stats():
     try:
         cursor = st.session_state.system.conn.cursor()
 
-        col1 , col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4 = st.columns(4)
 
         # registered persons
         cursor.execute("SELECT COUNT(*) FROM Persona")
         total_personas = cursor.fetchone()[0]
 
-        # detections today
-        cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE DATE(timestamp) = DATE('now')")
+        # detections today (localtime window)
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM Deteccion
+            WHERE timestamp >= datetime('now','localtime','start of day')
+              AND timestamp <  datetime('now','localtime','start of day','+1 day')
+            """
+        )
         detecciones_hoy = cursor.fetchone()[0]
 
         # most common emotion
-        cursor.execute("""
-            SELECT emocion, COUNT(*) as count 
-            FROM Deteccion 
-            GROUP BY emocion 
-            ORDER BY count DESC 
+        cursor.execute(
+            """
+            SELECT emocion, COUNT(*) as count
+            FROM Deteccion
+            GROUP BY emocion
+            ORDER BY count DESC
             LIMIT 1
-        """)
+            """
+        )
         emocion_data = cursor.fetchone()
         emocion_predominante = emocion_data[0] if emocion_data else "N/A"
 
@@ -317,19 +325,25 @@ def show_general_stats():
 
         # query for detections per hour
         st.subheader("Patrón de detecciones por hora")
-        cursor.execute("""
-            SELECT STRFTIME('%H', timestamp) as hora, COUNT(*) as count
+        cursor.execute(
+            """
+            SELECT STRFTIME('%H', timestamp, 'localtime') as hora, COUNT(*) as count
             FROM Deteccion
             GROUP BY hora
             ORDER BY hora
-        """)
+            """
+        )
 
         hora_data = cursor.fetchall()
         if hora_data:
             horas = [f"{int(h[0]):02d}:00" for h in hora_data]
             counts = [h[1] for h in hora_data]
-            fig = px.line(x=horas, y=counts, title='Patrón de Detecciones por Hora',
-                        labels={'x': 'Hora del día', 'y': 'Número de detecciones'})
+            fig = px.line(
+                x=horas,
+                y=counts,
+                title='Patrón de Detecciones por Hora',
+                labels={'x': 'Hora del día', 'y': 'Número de detecciones'}
+            )
             st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"Error al mostrar estadisticas generales: {e}")
