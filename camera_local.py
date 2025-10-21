@@ -435,6 +435,8 @@ def detection_mode(args):
         cur_thr = conn_thr.cursor()
         last_ts = 0.0
         last_emo_ts = 0.0
+        last_log_ts = 0.0
+        last_logged_emotion = None
         # Box smoothing state and emotion smoothing
         sm_box = None  # [x0,y0,x1,y1]
         miss_count = 0
@@ -522,24 +524,33 @@ def detection_mode(args):
                         else:
                             emotion, emo_conf = e_label, float(e_conf)
                         last_emo_ts = now
-                    # Save detection whenever we computed any of the two signals
+                    # Save detection only if interval elapsed or emotion changed
                     if (emotion is not None) or (recog_conf is not None):
-                        cur_thr.execute(
-                            "INSERT INTO Deteccion(id_persona, recog_confianza, emocion, emocion_confianza, timestamp) VALUES(?,?,?,?,?)",
-                            (pid, recog_conf if pid is not None else None, emotion if emotion is not None else 'neutral', emo_conf if emo_conf is not None else 0.0, datetime.now())
-                        )
-                        det_id = cur_thr.lastrowid
-                        # Persist full distribution if available
-                        try:
-                            if 'e_dist' in locals():
-                                for emo, confv in e_dist.items():
-                                    cur_thr.execute(
-                                        "INSERT INTO DeteccionEmocionDetalle(id_deteccion, emocion, confianza) VALUES(?,?,?)",
-                                        (det_id, emo, float(confv))
-                                    )
-                        except Exception:
-                            pass
-                        conn_thr.commit()
+                        allow_log = False
+                        if emotion is not None and emotion != last_logged_emotion:
+                            allow_log = True
+                        elif (now - last_log_ts) * 1000.0 >= float(getattr(args, 'min_log_interval_ms', 5000.0)):
+                            allow_log = True
+                        if allow_log:
+                            cur_thr.execute(
+                                "INSERT INTO Deteccion(id_persona, recog_confianza, emocion, emocion_confianza, timestamp) VALUES(?,?,?,?,?)",
+                                (pid, recog_conf if pid is not None else None, emotion if emotion is not None else 'neutral', emo_conf if emo_conf is not None else 0.0, datetime.now())
+                            )
+                            det_id = cur_thr.lastrowid
+                            # Persist full distribution if available
+                            try:
+                                if 'e_dist' in locals():
+                                    for emo, confv in e_dist.items():
+                                        cur_thr.execute(
+                                            "INSERT INTO DeteccionEmocionDetalle(id_deteccion, emocion, confianza) VALUES(?,?,?)",
+                                            (det_id, emo, float(confv))
+                                        )
+                            except Exception:
+                                pass
+                            conn_thr.commit()
+                            last_log_ts = now
+                            if emotion is not None:
+                                last_logged_emotion = emotion
                 else:
                     # No detection this cycle: increment miss counter; keep last box for a few cycles to reduce flicker
                     miss_count += 1
@@ -653,6 +664,7 @@ def main():
     pd.add_argument('--force-mjpg', action='store_true', help='Forzar formato MJPG en la camara para bajar latencia CPU')
     pd.add_argument('--target-fps', type=float, default=0.0, help='Intentar fijar FPS objetivo de la camara (puede no tener efecto)')
     pd.add_argument('--box-smooth-alpha', type=float, default=0.5, help='Factor de suavizado exponencial para la caja del rostro (0-1)')
+    pd.add_argument('--min-log-interval-ms', type=float, default=5000.0, help='Intervalo minimo entre registros consecutivos en DB (ms), a menos que cambie la emocion')
 
     args = parser.parse_args()
     if args.mode == 'register':

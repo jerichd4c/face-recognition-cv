@@ -474,11 +474,12 @@ def show_detection_page():
         embed_model = st.selectbox("Modelo de embeddings", options=['ArcFace','Facenet','VGG-Face'], index=0)
     with c2:
         emo_backend = st.selectbox("Backend emociones (DeepFace)", options=['opencv','retinaface','mediapipe','skip'], index=1)
-        emo_ms = st.slider("Intervalo emociones (ms)", 500, 3000, 1500, 50)
+        emo_ms = st.slider("Intervalo emociones (ms)", 500, 10000, 3000, 50)
         crop_padding = st.slider("Padding recorte emociones", 0.0, 0.3, 0.15, 0.01)
         emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)
         emo_smooth = st.slider("Suavizado emociones (frames)", 1, 15, 5, 1)
         disable_emotion = st.checkbox("Deshabilitar emociones (máximo FPS)", value=False)
+        min_log_ms = st.slider("Intervalo mínimo de guardado (ms)", 1000, 20000, 5000, 100, help="Limita la frecuencia con la que se escriben registros en la base de datos. Si hay una nueva emoción, se guardará aunque no se cumpla este intervalo.")
 
     st.subheader("Ajustes de cámara")
     colr1, colr2 = st.columns(2)
@@ -538,6 +539,7 @@ def show_detection_page():
                         '--emo-smooth-frames', str(int(emo_smooth)),
                         '--emotion-scale', str(float(emo_scale)),
                         '--crop-padding', str(float(crop_padding)),
+                        '--min-log-interval-ms', str(int(min_log_ms)),
                     ]
                 else:
                     cmd += ['--no-emotion']
