@@ -275,7 +275,12 @@ def load_person_embeddings(conn) -> dict[int, list[np.ndarray]]:
 
 
 def recognize(emb: np.ndarray, store: dict[int, list[np.ndarray]], thr: float) -> tuple[int | None, float]:
-    best_id, best = None, 0.0
+    """Return (matched_person_id_or_None, best_similarity).
+    - best_similarity is the max cosine similarity across all stored embeddings (regardless of threshold)
+    - person_id is only returned if best_similarity >= thr, else None
+    """
+    best_pid = None
+    best_sim = 0.0
     for pid, lst in store.items():
         if not lst:
             continue
@@ -284,9 +289,11 @@ def recognize(emb: np.ndarray, store: dict[int, list[np.ndarray]], thr: float) -
         except Exception:
             sims = [float(np.dot(emb, e)) for e in lst]
         s = max(sims) if sims else 0.0
-        if s >= thr and s > best:
-            best, best_id = s, pid
-    return best_id, float(best)
+        if s > best_sim:
+            best_sim = s
+            best_pid = pid
+    matched = best_pid if best_sim >= thr else None
+    return matched, float(best_sim)
 
 
 def register_mode(args):
