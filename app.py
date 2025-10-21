@@ -5,7 +5,12 @@ import io
 import sqlite3
 import time
 import pickle
+import hashlib
 from typing import Optional, Tuple
+import subprocess
+import sys
+import os
+from collections import deque
 
 import cv2
 import numpy as np
@@ -22,18 +27,6 @@ from camera_local import (
     recognize,
     load_person_embeddings,
 )
-
-try:
-    # Optional dependency: used for real-time camera streaming
-    from streamlit_webrtc import (
-        webrtc_streamer,
-        VideoTransformerBase,
-        WebRtcMode,
-        RTCConfiguration,
-    )
-    _WEBRTC_AVAILABLE = True
-except Exception:
-    _WEBRTC_AVAILABLE = False
 
 # initial page config
 st.set_page_config(
@@ -106,6 +99,20 @@ class FacialRecognitionSystem():
             )
         """)
         print("Tabla deteccion creada o actualizada")
+
+        # Emotion detail table (full distribution per detection)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS DeteccionEmocionDetalle (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_deteccion INTEGER NOT NULL,
+                emocion TEXT NOT NULL,
+                confianza REAL NOT NULL,
+                FOREIGN KEY (id_deteccion) REFERENCES Deteccion (id)
+            )
+            """
+        )
+        print("Tabla detalle de emociones creada")
 
         # Migration path from legacy schema if needed
         try:
@@ -194,6 +201,17 @@ if 'system' not in st.session_state:
 if 'reg_captures' not in st.session_state:
     # Holds captured registration images as raw bytes
     st.session_state.reg_captures = []
+if 'reg_hashes' not in st.session_state:
+    st.session_state.reg_hashes = set()
+if 'reg_form_ok' not in st.session_state:
+    st.session_state.reg_form_ok = False
+if 'reg_form_data' not in st.session_state:
+    st.session_state.reg_form_data = {"nombre":"", "apellido":"", "email":""}
+if 'reg_embs' not in st.session_state:
+    # Optional cache: map image hash -> embedding ndarray (to speed up save)
+    st.session_state.reg_embs = {}
+if 'native_proc_pid' not in st.session_state:
+    st.session_state.native_proc_pid = None
 
 def main():
     st.sidebar.title("Sistema de Reconocimiento Facial")
@@ -210,20 +228,6 @@ def main():
         show_detection_page()
     else:
         show_reports_page()
-
-# reports page
-def show_reports_page():
-    st.title("Reportes y estadisticas")
-    
-    tab1, tab2, tab3 = st.tabs(["Graficos de emociones", "Estadisticas generales", "Historial de detecciones" ])
-
-    with tab1:
-        show_emotion_charts()
-    with tab2:
-        show_general_stats()
-    with tab3:
-        show_detection_history()
-
 # PAGE FUNCTIONS (REPORTS PAGE)
 
 # emotions chart
@@ -271,7 +275,6 @@ def show_general_stats():
     st.subheader("Estadisticas generales")
 
     try:
-
         cursor = st.session_state.system.conn.cursor()
 
         col1 , col2, col3, col4 = st.columns(4)
@@ -303,7 +306,6 @@ def show_general_stats():
         tasa_reconocimiento = (reconocimientos_confiables / total_reconocimientos * 100) if total_reconocimientos > 0 else 0
 
         # metrics
-
         with col1:
             st.metric("Total de personas registradas", total_personas)
         with col2:
@@ -314,7 +316,6 @@ def show_general_stats():
             st.metric("Tasa de reconocimientos confiables", f"{tasa_reconocimiento:.1f}%")
 
         # query for detections per hour
-
         st.subheader("Patrón de detecciones por hora")
         cursor.execute("""
             SELECT STRFTIME('%H', timestamp) as hora, COUNT(*) as count
@@ -323,141 +324,28 @@ def show_general_stats():
             ORDER BY hora
         """)
 
-    # detection graph per hour
-
         hora_data = cursor.fetchall()
         if hora_data:
             horas = [f"{int(h[0]):02d}:00" for h in hora_data]
             counts = [h[1] for h in hora_data]
-
-
             fig = px.line(x=horas, y=counts, title='Patrón de Detecciones por Hora',
                         labels={'x': 'Hora del día', 'y': 'Número de detecciones'})
             st.plotly_chart(fig, use_container_width=True)
-        
     except Exception as e:
         st.error(f"Error al mostrar estadisticas generales: {e}")
 
-# history
-def show_detection_history():
-    st.subheader("Historial de detecciones")
-    try:
-        # filters
-        col1, col2, col3 = st.columns(3)
 
-        with col1:
-            date_filter = st.date_input("Filtrar por fecha")
-        with col2:
-            cursor = st.session_state.system.conn.cursor()
-            cursor.execute("SELECT id, nombre || ' ' || apellido FROM Persona")
-            personas = cursor.fetchall()
-            persona_options = ["Todas"] + [p[1] for p in personas]
-            person_filter = st.selectbox("Filtrar por persona", persona_options)
-        with col3:
-            emotion_options = ["Todas", "happy", "sad", "angry", "surprise", "fear", "disgust", "neutral"]
-            emotion_filter = st.selectbox("Filtrar por emoción", emotion_options)
-
-        # build query
-        query = """
-            SELECT D.timestamp, P.nombre, P.apellido, D.emocion, D.emocion_confianza, D.recog_confianza
-            FROM Deteccion D
-            LEFT JOIN Persona P ON D.id_persona = P.id
-            WHERE 1=1
-        """
-        params = []
-
-        # apply filters
-        if date_filter:
-            query += " AND DATE(D.timestamp) = ?"
-            params.append(date_filter.strftime('%Y-%m-%d'))
-
-        if person_filter != "Todas":
-            query += " AND P.nombre || ' ' || P.apellido = ?"
-            params.append(person_filter)
-
-        if emotion_filter != "Todas":
-            query += " AND D.emocion = ?"
-            params.append(emotion_filter)
-
-        query += " ORDER BY D.timestamp DESC"
-
-        cursor = st.session_state.system.conn.cursor()
-        cursor.execute(query, params)
-        detections = cursor.fetchall()
-
-        # display data
-        if detections:
-            df = pd.DataFrame(detections, columns=['Fecha/Hora', 'Nombre', 'Apellido', 'Emoción', 'Conf. Emoción', 'Conf. Reconocimiento'])
-
-            def fmt_pct(x):
-                try:
-                    v = float(x) if x is not None else 0.0
-                    return f"{v*100:.1f}%"
-                except Exception:
-                    return ""
-
-            df['Conf. Emoción'] = df['Conf. Emoción'].apply(fmt_pct)
-            df['Conf. Reconocimiento'] = df['Conf. Reconocimiento'].apply(lambda x: fmt_pct(x) if x is not None else "")
-            st.dataframe(df, use_container_width=True)
-
-            # save button CSV file
-            if st.button("Guardar reporte en CSV"):
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="Descargar CSV",
-                    data=csv,
-                    file_name=f"detecciones_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.info("No hay datos para mostrar con los filtros seleccionados")
-
-    except Exception as e:
-        st.error(f"Error al mostrar historial de detecciones: {e}")
-
-# ============ REGISTRO ============
-def _calc_quality(face_bgr: np.ndarray, full_bgr: np.ndarray, bbox: Tuple[int,int,int,int]) -> dict:
-    # Sharpness via Laplacian variance
-    gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
-    lap = cv2.Laplacian(gray, cv2.CV_64F)
-    sharpness = float(lap.var())
-    # Brightness as mean intensity
-    brightness = float(gray.mean())
-    # Face ratio vs frame
-    x,y,w,h = bbox
-    H, W = full_bgr.shape[:2]
-    face_ratio = (w*h) / float(W*H + 1e-6)
-    return {"sharpness": sharpness, "brightness": brightness, "face_ratio": face_ratio}
-
-
-def _detect_largest_face(bgr: np.ndarray) -> Optional[Tuple[int,int,int,int]]:
-    cascade = st.session_state.system.get_cascade()
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(60,60))
-    if len(faces) == 0:
-        return None
-    (x,y,w,h) = max(faces, key=lambda b: b[2]*b[3])
-    return int(x), int(y), int(w), int(h)
-
-
-def _bgr_from_upload(upload_bytes: bytes) -> np.ndarray:
-    img = Image.open(io.BytesIO(upload_bytes)).convert('RGB')
-    rgb = np.array(img)
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    return bgr
-
-
+# PAGE: Registro
 def show_registration_page():
     st.title("Registro de Personas")
-
-    with st.form("persona_form", clear_on_submit=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            nombre = st.text_input("Nombre")
-            email = st.text_input("Email")
-        with col2:
-            apellido = st.text_input("Apellido")
-            force = st.checkbox("Forzar guardado si hay posible duplicado", value=False)
+    with st.form("form-registro"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            nombre = st.text_input("Nombre", value=st.session_state.reg_form_data.get("nombre", ""))
+        with c2:
+            apellido = st.text_input("Apellido", value=st.session_state.reg_form_data.get("apellido", ""))
+        with c3:
+            email = st.text_input("Email", value=st.session_state.reg_form_data.get("email", ""))
         submitted = st.form_submit_button("Confirmar datos")
 
     if submitted:
@@ -465,6 +353,8 @@ def show_registration_page():
             st.error("Completa nombre, apellido y email.")
         else:
             st.success("Datos validados. Captura imágenes a continuación.")
+            st.session_state.reg_form_ok = True
+            st.session_state.reg_form_data = {"nombre": nombre, "apellido": apellido, "email": email}
 
     st.markdown("---")
     st.subheader("Capturas de rostro")
@@ -472,256 +362,194 @@ def show_registration_page():
 
     c1, c2 = st.columns([2,1])
     with c1:
-        img_upload = st.camera_input("Tomar foto")
+        img_upload = st.camera_input("Tomar foto", disabled=not st.session_state.reg_form_ok)
+        col_btn = st.columns(1)[0]
+        with col_btn:
+            if st.button("Limpiar capturas"):
+                st.session_state.reg_captures = []
+                st.session_state.reg_hashes = set()
+                st.session_state.reg_embs = {}
         if img_upload is not None:
-            # Add to session buffer
-            st.session_state.reg_captures.append(img_upload.getvalue())
+            raw = img_upload.getvalue()
+            h = hashlib.sha256(raw).hexdigest()
+            if h not in st.session_state.reg_hashes:
+                st.session_state.reg_captures.append(raw)
+                st.session_state.reg_hashes.add(h)
+                st.success("Captura agregada")
     with c2:
-        if st.button("Limpiar capturas"):
-            st.session_state.reg_captures = []
         st.write(f"Capturas acumuladas: {len(st.session_state.reg_captures)}")
+        save_now = st.button("Guardar en base de datos", disabled=(not st.session_state.reg_form_ok or len(st.session_state.reg_captures) == 0))
 
-    # Preview + quality
+    # Preview de thumbnails
     if st.session_state.reg_captures:
-        store = load_person_embeddings(st.session_state.system.conn)
-        # find person id by email if exists (to allow add more)
-        cursor = st.session_state.system.conn.cursor()
-        cursor.execute("SELECT id FROM Persona WHERE email=?", (email,))
-        row = cursor.fetchone()
-        existing_pid = row[0] if row else None
-        dup_threshold = st.slider("Umbral de duplicado (similitud coseno)", 0.5, 0.95, 0.8, 0.01)
-        qual_cols = st.columns(3)
+        cols = st.columns(3)
         for i, raw in enumerate(st.session_state.reg_captures[-6:]):
-            bgr = _bgr_from_upload(raw)
-            bbox = _detect_largest_face(bgr)
-            with qual_cols[i % 3]:
+            with cols[i % 3]:
                 st.image(Image.open(io.BytesIO(raw)), caption=f"Captura #{i+1}", use_container_width=True)
-                if bbox is None:
-                    st.warning("No se detectó rostro")
-                    continue
-                x,y,w,h = bbox
-                face = bgr[y:y+h, x:x+w]
-                # Resize for embedding speed
-                face_small = cv2.resize(cv2.cvtColor(face, cv2.COLOR_BGR2RGB), (0,0), fx=0.5, fy=0.5)
-                emb = extract_embedding(face_small)
-                qm = _calc_quality(face, bgr, (x,y,w,h))
-                st.write(f"Nitidez: {qm['sharpness']:.0f}")
-                st.write(f"Brillo: {qm['brightness']:.0f}")
-                st.write(f"Cobertura: {qm['face_ratio']*100:.1f}%")
-                if emb is None:
-                    st.error("No se pudo extraer embedding")
-                    continue
-                # duplicate check against other persons
-                best_score = 0.0
-                best_pid = None
-                for pid, lst in store.items():
-                    if existing_pid is not None and pid == existing_pid:
-                        continue
-                    if not lst:
-                        continue
-                    sims = [float(np.dot(emb, e)) for e in lst]
-                    s = max(sims) if sims else 0.0
-                    if s > best_score:
-                        best_score, best_pid = s, pid
-                if best_pid is not None and best_score >= dup_threshold:
-                    st.warning(f"Posible duplicado (sim={best_score:.3f}) con persona id {best_pid}")
-                else:
-                    st.success("Sin duplicados aparentes")
 
-    st.markdown("---")
-    can_save = (nombre and apellido and email and len(st.session_state.reg_captures) >= 5)
-    save_btn = st.button("Guardar registro (mín. 5 capturas)", disabled=not can_save)
-    if save_btn:
+    # Guardado
+    if save_now:
         try:
             conn = st.session_state.system.conn
             cur = conn.cursor()
-            # Create/find person
-            cur.execute("SELECT id FROM Persona WHERE email=?", (email,))
+            # Crear/obtener persona
+            cur.execute("SELECT id FROM Persona WHERE email = ?", (st.session_state.reg_form_data["email"],))
             row = cur.fetchone()
             if row:
                 person_id = row[0]
             else:
-                cur.execute("INSERT INTO Persona(nombre, apellido, email) VALUES(?,?,?)", (nombre, apellido, email))
-                conn.commit()
+                cur.execute(
+                    "INSERT INTO Persona(nombre, apellido, email) VALUES(?,?,?)",
+                    (st.session_state.reg_form_data["nombre"], st.session_state.reg_form_data["apellido"], st.session_state.reg_form_data["email"])
+                )
                 person_id = cur.lastrowid
-            # Load embeddings of others for duplicate enforcement
-            store = load_person_embeddings(conn)
+
             saved = 0
-            dup_threshold = 0.8
             for raw in st.session_state.reg_captures:
-                bgr = _bgr_from_upload(raw)
-                bbox = _detect_largest_face(bgr)
-                if bbox is None:
-                    continue
-                x,y,w,h = bbox
-                face = cv2.cvtColor(bgr[y:y+h, x:x+w], cv2.COLOR_BGR2RGB)
-                face_small = cv2.resize(face, (0,0), fx=0.5, fy=0.5)
-                emb = extract_embedding(face_small)
-                if emb is None:
-                    continue
-                # duplicate check
-                best_score = 0.0
-                best_pid = None
-                for pid, lst in store.items():
-                    if pid == person_id:
+                try:
+                    img = Image.open(io.BytesIO(raw)).convert("RGB")
+                    frame = np.array(img)
+                    emb = extract_embedding(frame)
+                    if emb is None:
                         continue
-                    if not lst:
-                        continue
-                    sims = [float(np.dot(emb, e)) for e in lst]
-                    s = max(sims) if sims else 0.0
-                    if s > best_score:
-                        best_score, best_pid = s, pid
-                if best_pid is not None and best_score >= dup_threshold and not force:
-                    # skip saving this one
+                    blob = pickle.dumps(emb)
+                    cur.execute("INSERT INTO Rostro(id_persona, rostro) VALUES(?, ?)", (person_id, blob))
+                    saved += 1
+                except Exception:
                     continue
-                cur.execute("INSERT INTO Rostro(id_persona, rostro) VALUES(?,?)", (person_id, sqlite3.Binary(pickle.dumps(emb))))
-                conn.commit()
-                saved += 1
-            st.success(f"Registro guardado. Embeddings almacenados: {saved}")
+            conn.commit()
+            st.success(f"Guardado: {saved} capturas para {st.session_state.reg_form_data['nombre']} {st.session_state.reg_form_data['apellido']}")
+            # limpiar estado
             st.session_state.reg_captures = []
+            st.session_state.reg_hashes = set()
+            st.session_state.reg_embs = {}
+            st.session_state.reg_form_ok = False
         except Exception as e:
-            st.error(f"Error al guardar registro: {e}")
+            st.error(f"No se pudo guardar: {e}")
 
 
-# ============ DETECCIÓN ============
+# PAGE: Detección (nativo)
 def show_detection_page():
-    st.title("Detección en Tiempo Real")
-    if not _WEBRTC_AVAILABLE:
-        st.warning("streamlit-webrtc no está instalado. Agrega 'streamlit-webrtc' y 'av' a requirements.txt")
-        st.stop()
-
-    st.caption("Video con overlay de nombre, emoción y confidencias. Presiona el botón para iniciar/detener.")
+    st.title("Detección en Tiempo Real (Nativo OpenCV)")
+    st.caption("Se abrirá una ventana nativa con el video y overlay. Cierra con 'q'.")
 
     c1, c2 = st.columns(2)
     with c1:
         threshold = st.slider("Umbral reconocimiento (coseno)", 0.5, 0.95, 0.6, 0.01)
         infer_ms = st.slider("Intervalo inferencia (ms)", 100, 2000, 500, 50)
         detect_scale = st.slider("Escala detección rostro", 0.2, 1.0, 0.5, 0.05)
+        infer_scale = st.slider("Escala de inferencia (rostro)", 0.3, 1.0, 0.5, 0.05)
     with c2:
-        emo_backend = st.selectbox("Backend emociones", options=['opencv','retinaface','mediapipe','skip'], index=0)
+        emo_backend = st.selectbox("Backend emociones", options=['opencv','retinaface','mediapipe','skip'], index=1)
         emo_ms = st.slider("Intervalo emociones (ms)", 500, 3000, 1500, 50)
         crop_padding = st.slider("Padding recorte emociones", 0.0, 0.3, 0.15, 0.01)
+        emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)
+        disable_emotion = st.checkbox("Deshabilitar emociones (máximo FPS)", value=False)
 
-    rtc_config = RTCConfiguration({
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    })
+    st.subheader("Ajustes de cámara")
+    colr1, colr2 = st.columns(2)
+    with colr1:
+        res_option = st.selectbox(
+            "Resolución",
+            ["640x480 (SD)", "1280x720 (HD)", "1920x1080 (FHD)", "Personalizada"],
+            index=1,
+            help="Aumentar resolución mejora calidad pero puede reducir FPS"
+        )
+    with colr2:
+        cam_idx = st.number_input("Índice de cámara", min_value=0, max_value=10, value=0, step=1)
 
-    import av  # ensure available for VideoFrame conversions
+    if res_option == "640x480 (SD)":
+        cam_w, cam_h = 640, 480
+    elif res_option == "1280x720 (HD)":
+        cam_w, cam_h = 1280, 720
+    elif res_option == "1920x1080 (FHD)":
+        cam_w, cam_h = 1920, 1080
+    else:
+        cwx, cwy = st.columns(2)
+        with cwx:
+            cam_w = st.number_input("Ancho (px)", min_value=320, max_value=3840, value=1280, step=16)
+        with cwy:
+            cam_h = st.number_input("Alto (px)", min_value=240, max_value=2160, value=720, step=16)
 
-    class Transformer(VideoTransformerBase):
-        def __init__(self) -> None:
-            super().__init__()
-            # Separate DB connection for transformer thread
-            self.conn = sqlite3.connect('facial_recognition.db', check_same_thread=False)
-            self.cur = self.conn.cursor()
-            self.store = load_person_embeddings(self.conn)
-            # Instantiate cascade locally (do not rely on session_state in worker thread)
-            from cv2 import data as cv2_data
-            self.cascade = cv2.CascadeClassifier(
-                cv2_data.haarcascades + 'haarcascade_frontalface_default.xml'
-            )
-            self.last_ts = 0.0
-            self.last_emo_ts = 0.0
-            self.label = 'Desconocido'
-            self.recog_conf = 0.0
-            self.emotion = 'neutral'
-            self.emo_conf = 0.0
-            self.last_box = None
-            self.top3 = []  # list of (emo, conf)
-
-        def recv(self, frame):
-            img = frame.to_ndarray(format="bgr24")
-            now = time.time()
-            # Run heavy inference at configured cadence
-            if (now - self.last_ts) >= (infer_ms/1000.0):
-                self.last_ts = now
-                try:
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    ds = float(detect_scale)
-                    small = cv2.resize(gray, (0,0), fx=ds, fy=ds)
-                    faces = self.cascade.detectMultiScale(small, 1.1, 5, minSize=(max(30, int(60*ds)), max(30, int(60*ds))))
-                    pid = None
-                    if len(faces) > 0:
-                        xs, ys, ws, hs = max(faces, key=lambda b: b[2]*b[3])
-                        x = int(xs/ds); y = int(ys/ds); w = int(ws/ds); h = int(hs/ds)
-                        pad = float(crop_padding)
-                        if pad > 0:
-                            px = int(w*pad); py = int(h*pad)
-                            x0 = max(0, x-px); y0 = max(0, y-py)
-                            x1 = min(img.shape[1], x+w+px); y1 = min(img.shape[0], y+h+py)
-                        else:
-                            x0,y0,x1,y1 = x,y,x+w,y+h
-                        self.last_box = (x0,y0,x1-x0,y1-y0)
-                        face_rgb = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2RGB)
-                        small_rgb = cv2.resize(face_rgb, (0,0), fx=0.5, fy=0.5)
-                        emb = extract_embedding(small_rgb)
-                        if emb is not None:
-                            pid, rconf = recognize(emb, self.store, threshold)
-                            self.recog_conf = float(rconf)
-                            if pid is not None:
-                                self.cur.execute("SELECT nombre, apellido FROM Persona WHERE id=?", (pid,))
-                                row = self.cur.fetchone()
-                                if row:
-                                    self.label = f"{row[0]} {row[1]}"
-                                else:
-                                    self.label = 'Desconocido'
-                            else:
-                                self.label = 'Desconocido'
-                        # Emotions at its own cadence
-                        if (now - self.last_emo_ts) >= (emo_ms/1000.0) and emo_backend != 'skip':
-                            e_label, e_conf, e_dist = analyze_emotion_full(face_rgb, backend=emo_backend)
-                            self.emotion = e_label
-                            self.emo_conf = float(e_conf)
-                            # Compute top-3
-                            items = sorted(e_dist.items(), key=lambda kv: kv[1], reverse=True)[:3]
-                            self.top3 = items
-                            self.last_emo_ts = now
-                            # Persist detection with detail
-                            self.cur.execute(
-                                "INSERT INTO Deteccion(id_persona, recog_confianza, emocion, emocion_confianza, timestamp) VALUES(?,?,?,?,?)",
-                                (pid, self.recog_conf if pid is not None else None, self.emotion, self.emo_conf, datetime.now())
-                            )
-                            det_id = self.cur.lastrowid
-                            try:
-                                for emo, confv in e_dist.items():
-                                    self.cur.execute(
-                                        "INSERT INTO DeteccionEmocionDetalle(id_deteccion, emocion, confianza) VALUES(?,?,?)",
-                                        (det_id, emo, float(confv))
-                                    )
-                            except Exception:
-                                pass
-                            self.conn.commit()
-                    else:
-                        self.last_box = None
-                except Exception:
-                    # keep last known state on errors
-                    pass
-            # Always draw the latest overlay
-            if self.last_box is not None:
-                x,y,w,h = self.last_box
-                cv2.rectangle(img, (x,y), (x+w, y+h), (0,255,0), 2)
-            cv2.putText(img, f"Persona: {self.label}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-            cv2.putText(img, f"Conf. recog: {self.recog_conf*100:.1f}%  Emocion: {self.emotion} ({self.emo_conf*100:.1f}%)", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
-            # Top-3 emotions line
-            if self.top3:
-                txt = "  ".join([f"{k}:{v*100:.0f}%" for k, v in self.top3])
-                cv2.putText(img, f"Top-3: {txt}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180,180,0), 2)
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-        def __del__(self):
+    colb1, colb2, colb3 = st.columns([1,1,2])
+    can_start = st.session_state.native_proc_pid is None
+    with colb1:
+        if st.button("Iniciar", disabled=not can_start):
             try:
-                self.cur.close()
-                self.conn.close()
-            except Exception:
-                pass
+                cmd = [
+                    sys.executable,
+                    os.path.join(os.getcwd(), 'camera_local.py'),
+                    'detect',
+                    '--camera', str(int(cam_idx)),
+                    '--threshold', str(float(threshold)),
+                    '--infer-interval-ms', str(int(infer_ms)),
+                    '--emotion-interval-ms', str(int(emo_ms)),
+                    '--scale', str(float(infer_scale)),
+                    '--detect-scale', str(float(detect_scale)),
+                    '--frame-width', str(int(cam_w)),
+                    '--frame-height', str(int(cam_h)),
+                    '--emotion-backend', str(emo_backend),
+                    '--emotion-scale', str(float(emo_scale)),
+                    '--crop-padding', str(float(crop_padding)),
+                ]
+                if disable_emotion:
+                    cmd.append('--no-emotion')
+                creationflags = 0
+                if os.name == 'nt' and hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
+                    creationflags = subprocess.CREATE_NEW_CONSOLE
+                proc = subprocess.Popen(cmd, creationflags=creationflags)
+                st.session_state.native_proc_pid = proc.pid
+                st.success(f"Detección nativa iniciada (PID {proc.pid}). Cierra con 'q' en la ventana o usa Detener.")
+            except Exception as e:
+                st.error(f"No se pudo iniciar la detección nativa: {e}")
+    with colb2:
+        stop_enabled = st.session_state.native_proc_pid is not None
+        if st.button("Detener", disabled=not stop_enabled):
+            try:
+                pid = st.session_state.native_proc_pid
+                if pid is not None:
+                    if os.name == 'nt':
+                        subprocess.call(['taskkill', '/PID', str(pid), '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    else:
+                        os.kill(pid, 9)
+                    st.session_state.native_proc_pid = None
+                    st.info("Detección nativa detenida")
+            except Exception as e:
+                st.error(f"No se pudo detener: {e}")
+    with colb3:
+        pid = st.session_state.native_proc_pid
+        st.write(f"Estado: {'En ejecución (PID '+str(pid)+')' if pid else 'Detenido'}")
 
-    webrtc_streamer(
-        key="detect-webrtc",
-        mode=WebRtcMode.SENDRECV,
-        video_transformer_factory=Transformer,
-        rtc_configuration=rtc_config,
-        media_stream_constraints={"video": True, "audio": False},
-    )
+
+# PAGE: Reportes
+def show_reports_page():
+    st.title("Reportes")
+    show_general_stats()
+    st.markdown("---")
+    show_emotion_charts()
+    st.markdown("---")
+    # Ultimas detecciones
+    try:
+        cur = st.session_state.system.conn.cursor()
+        cur.execute(
+            """
+            SELECT D.timestamp, COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
+                   D.recog_confianza, D.emocion, D.emocion_confianza
+            FROM Deteccion D
+            LEFT JOIN Persona P ON D.id_persona = P.id
+            ORDER BY D.timestamp DESC
+            LIMIT 100
+            """
+        )
+        rows = cur.fetchall()
+        if rows:
+            df = pd.DataFrame(rows, columns=["timestamp", "persona", "recog_confianza", "emocion", "emocion_confianza"])
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No hay detecciones registradas")
+    except Exception as e:
+        st.error(f"Error al cargar detecciones: {e}")
+
 
 if __name__ == "__main__":
     main()
