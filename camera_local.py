@@ -78,11 +78,11 @@ def normalize(v: np.ndarray) -> np.ndarray:
     return v.astype(np.float32)
 
 
-def extract_embedding(image_rgb: np.ndarray) -> np.ndarray | None:
+def extract_embedding(image_rgb: np.ndarray, model_name: str = "ArcFace") -> np.ndarray | None:
     try:
         rep = DeepFace.represent(
             img_path=image_rgb,
-            model_name="Facenet",
+            model_name=model_name,
             enforce_detection=False,
             detector_backend='opencv'
         )
@@ -139,6 +139,101 @@ def analyze_emotion_full(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[
         return 'neutral', 0.0, {k: 0.0 for k in ['angry','disgust','fear','happy','sad','surprise','neutral']}
     except Exception:
         return 'neutral', 0.0, {k: 0.0 for k in ['angry','disgust','fear','happy','sad','surprise','neutral']}
+
+
+def preprocess_emotion_roi(face_bgr: np.ndarray, upscale: float = 1.2, use_clahe: bool = True) -> np.ndarray:
+    """Upscale and apply CLAHE on L channel to enhance subtle expressions. Return RGB array."""
+    try:
+        bgr = face_bgr
+        if upscale and upscale != 1.0:
+            bgr = cv2.resize(bgr, (0, 0), fx=float(upscale), fy=float(upscale))
+        if use_clahe:
+            lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l2 = clahe.apply(l)
+            lab2 = cv2.merge((l2, a, b))
+            bgr = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return rgb
+    except Exception:
+        try:
+            return cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+        except Exception:
+            return face_bgr
+
+
+def load_opencv_dnn_face_detector(models_dir: str = "models"):
+    proto = os.path.join(models_dir, 'deploy.prototxt')
+    caffemodel = os.path.join(models_dir, 'res10_300x300_ssd_iter_140000.caffemodel')
+    if os.path.isfile(proto) and os.path.isfile(caffemodel):
+        try:
+            net = cv2.dnn.readNetFromCaffe(proto, caffemodel)
+            return net
+        except Exception:
+            return None
+    return None
+
+
+def detect_largest_face(frame_bgr: np.ndarray, gray: np.ndarray, backend: str, cascade, dnn_net, detect_scale: float) -> tuple[int | None, int | None, int | None, int | None]:
+    """Return (x0,y0,x1,y1) for the largest face or (None, None, None, None) if none."""
+    h, w = frame_bgr.shape[:2]
+    try:
+        if backend == 'opencv-dnn' and dnn_net is not None:
+            blob = cv2.dnn.blobFromImage(cv2.resize(frame_bgr, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+            dnn_net.setInput(blob)
+            detections = dnn_net.forward()
+            best = (-1.0, None)
+            for i in range(detections.shape[2]):
+                conf = float(detections[0, 0, i, 2])
+                if conf < 0.5:
+                    continue
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                (x0, y0, x1, y1) = box.astype("int")
+                x0, y0 = max(0, x0), max(0, y0)
+                x1, y1 = min(w, x1), min(h, y1)
+                area = max(0, x1 - x0) * max(0, y1 - y0)
+                if area > best[0]:
+                    best = (area, (x0, y0, x1, y1))
+            return best[1] if best[1] is not None else (None, None, None, None)
+        elif backend in ('retinaface', 'mediapipe'):
+            # Use DeepFace to extract faces with chosen backend
+            try:
+                faces = DeepFace.extract_faces(img_path=frame_bgr, detector_backend=backend, enforce_detection=False)
+                best = (-1.0, None)
+                for f in faces or []:
+                    fa = f.get('facial_area') or {}
+                    x = int(fa.get('x', 0)); y = int(fa.get('y', 0))
+                    w0 = int(fa.get('w', 0)); h0 = int(fa.get('h', 0))
+                    x0, y0, x1, y1 = x, y, x + w0, y + h0
+                    area = w0 * h0
+                    if area > best[0]:
+                        best = (area, (max(0, x0), max(0, y0), min(w, x1), min(h, y1)))
+                return best[1] if best[1] is not None else (None, None, None, None)
+            except Exception:
+                pass  # fall back to opencv
+        # If opencv-dnn requested but not available, note it
+        if backend == 'opencv-dnn' and dnn_net is None:
+            # Only print occasionally
+            print("[WARN] opencv-dnn backend seleccionado pero modelo Caffe no encontrado en ./models; usando Haar cascade.")
+        # Default: OpenCV Haar cascade
+        ds = float(detect_scale) if 0.2 <= detect_scale <= 1.0 else 0.5
+        small = cv2.resize(gray, (0, 0), fx=ds, fy=ds)
+        # Más permisivo para facilitar detección inicial
+        faces = cascade.detectMultiScale(small, 1.05, 3, minSize=(max(24, int(40*ds)), max(24, int(40*ds))))
+        # If no faces at scaled size, retry at full size to improve robustness
+        if len(faces) == 0 and ds != 1.0:
+            faces = cascade.detectMultiScale(gray, 1.05, 3, minSize=(40, 40))
+            if len(faces) == 0:
+                return (None, None, None, None)
+            xs, ys, ws, hs = max(faces, key=lambda b: b[2] * b[3])
+            x = int(xs); y = int(ys); w0 = int(ws); h0 = int(hs)
+            return (max(0, x), max(0, y), min(w, x + w0), min(h, y + h0))
+        xs, ys, ws, hs = max(faces, key=lambda b: b[2] * b[3])
+        x = int(xs / ds); y = int(ys / ds); w0 = int(ws / ds); h0 = int(hs / ds)
+        return (max(0, x), max(0, y), min(w, x + w0), min(h, y + h0))
+    except Exception:
+        return (None, None, None, None)
 
 
 def load_person_embeddings(conn) -> dict[int, list[np.ndarray]]:
@@ -291,6 +386,11 @@ def detection_mode(args):
     try:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(args.frame_width))
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(args.frame_height))
+        if args.target_fps and args.target_fps > 0:
+            cap.set(cv2.CAP_PROP_FPS, float(args.target_fps))
+        if args.force_mjpg:
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            cap.set(cv2.CAP_PROP_FOURCC, fourcc)
     except Exception:
         pass
     # Try to minimize internal buffering
@@ -305,7 +405,7 @@ def detection_mode(args):
     # Warm-up models to avoid first-time stutters
     try:
         dummy = np.zeros((160, 160, 3), dtype=np.uint8)
-        _ = extract_embedding(dummy)
+        _ = extract_embedding(dummy, model_name=args.embed_model)
         if not args.no_emotion:
             _ = analyze_emotion(dummy, backend=args.emotion_backend)
     except Exception:
@@ -324,12 +424,17 @@ def detection_mode(args):
     def inference_loop():
         # Do heavy work on a fixed interval without blocking display
         cascade = cv2.CascadeClassifier(os.path.join(cv2_data.haarcascades, 'haarcascade_frontalface_default.xml'))
+        dnn_net = load_opencv_dnn_face_detector()
         # Separate DB connection for this thread
         conn_thr = sqlite3.connect(DB_PATH, check_same_thread=False)
         cur_thr = conn_thr.cursor()
         last_ts = 0.0
         last_emo_ts = 0.0
-    # To reduce flicker, only update label/emotion when we have new values
+        # Box smoothing state and emotion smoothing
+        sm_box = None  # [x0,y0,x1,y1]
+        miss_count = 0
+        emo_hist = []
+        # To reduce flicker, only update label/emotion when we have new values
         while not stop_event.is_set():
             now = time.time()
             if (now - last_ts) < (args.infer_interval_ms / 1000.0):
@@ -344,13 +449,8 @@ def detection_mode(args):
             try:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                # Downscaled detection for speed
-                if 0.2 <= args.detect_scale <= 1.0:
-                    ds = float(args.detect_scale)
-                else:
-                    ds = 0.5
-                small_gray = cv2.resize(gray, (0, 0), fx=ds, fy=ds)
-                faces_small = cascade.detectMultiScale(small_gray, 1.1, 5, minSize=(max(30, int(60*ds)), max(30, int(60*ds))))
+                # Face detection (backend configurable)
+                x0, y0, x1, y1 = detect_largest_face(frame, gray, args.detector_backend, cascade, dnn_net, args.detect_scale)
                 # Defaults are None to preserve previous values if nothing updates
                 label = None
                 recog_conf = None
@@ -358,28 +458,39 @@ def detection_mode(args):
                 emo_conf = None
                 box = None
                 pid = None
-                if len(faces_small) > 0:
-                    (xs, ys, ws, hs) = max(faces_small, key=lambda b: b[2]*b[3])
-                    # Scale back to original frame coords
-                    x = int(xs / ds)
-                    y = int(ys / ds)
-                    w = int(ws / ds)
-                    h = int(hs / ds)
+                if x0 is not None:
                     # Apply padding around face box for better emotion context
+                    w = int(x1 - x0)
+                    h = int(y1 - y0)
                     pad = float(args.crop_padding)
                     if pad > 0:
                         px = int(w * pad)
                         py = int(h * pad)
-                        x0 = max(0, x - px)
-                        y0 = max(0, y - py)
-                        x1 = min(rgb.shape[1], x + w + px)
-                        y1 = min(rgb.shape[0], y + h + py)
+                        x0p = max(0, x0 - px)
+                        y0p = max(0, y0 - py)
+                        x1p = min(rgb.shape[1], x1 + px)
+                        y1p = min(rgb.shape[0], y1 + py)
                     else:
-                        x0, y0, x1, y1 = x, y, x + w, y + h
-                    box = (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
-                    face_rgb = rgb[y0:y1, x0:x1]
-                    small = cv2.resize(face_rgb, (0, 0), fx=args.scale, fy=args.scale)
-                    emb = extract_embedding(small)
+                        x0p, y0p, x1p, y1p = x0, y0, x1, y1
+                    # Box smoothing (EMA)
+                    if sm_box is None:
+                        sm_box = [float(x0p), float(y0p), float(x1p), float(y1p)]
+                    else:
+                        a = max(0.0, min(1.0, float(args.box_smooth_alpha)))
+                        sm_box[0] = a * x0p + (1 - a) * sm_box[0]
+                        sm_box[1] = a * y0p + (1 - a) * sm_box[1]
+                        sm_box[2] = a * x1p + (1 - a) * sm_box[2]
+                        sm_box[3] = a * y1p + (1 - a) * sm_box[3]
+                    x0s, y0s, x1s, y1s = [int(v) for v in sm_box]
+                    box = (int(x0s), int(y0s), int(x1s - x0s), int(y1s - y0s))
+                    miss_count = 0
+                    face_rgb = rgb[y0s:y1s, x0s:x1s]
+                    # Downscale for embedding speed
+                    if args.scale and args.scale != 1.0:
+                        small = cv2.resize(face_rgb, (0, 0), fx=args.scale, fy=args.scale)
+                    else:
+                        small = face_rgb
+                    emb = extract_embedding(small, model_name=args.embed_model)
                     if emb is not None:
                         pid, rconf = recognize(emb, store, args.threshold)
                         recog_conf = float(rconf)
@@ -390,12 +501,21 @@ def detection_mode(args):
                                 label = f"{row[0]} {row[1]}"
                     # Emotion analysis on its own cadence and independently of recognition
                     if not args.no_emotion and (now - last_emo_ts) >= (args.emotion_interval_ms / 1000.0):
-                        # Optionally use a larger face for emotion accuracy
-                        emo_face = face_rgb
-                        if args.emotion_scale and args.emotion_scale != 1.0:
-                            emo_face = cv2.resize(face_rgb, (0, 0), fx=args.emotion_scale, fy=args.emotion_scale)
-                        e_label, e_conf, e_dist = analyze_emotion_full(emo_face, backend=args.emotion_backend)
-                        emotion, emo_conf = e_label, float(e_conf)
+                        # Emotion preprocessing and smoothing
+                        emo_bgr = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2BGR)
+                        emo_rgb = preprocess_emotion_roi(emo_bgr, upscale=max(1.0, float(args.emotion_scale)), use_clahe=True)
+                        e_label, e_conf, e_dist = analyze_emotion_full(emo_rgb, backend=args.emotion_backend)
+                        # Smooth distribution over recent frames
+                        if args.emo_smooth_frames and args.emo_smooth_frames > 1:
+                            emo_hist.append(dict(e_dist))
+                            if len(emo_hist) > int(args.emo_smooth_frames):
+                                emo_hist.pop(0)
+                            keys = list(e_dist.keys())
+                            avg = {k: float(sum(d.get(k, 0.0) for d in emo_hist) / len(emo_hist)) for k in keys}
+                            top = max(avg.items(), key=lambda kv: kv[1])
+                            emotion, emo_conf, e_dist = top[0], float(top[1]), avg
+                        else:
+                            emotion, emo_conf = e_label, float(e_conf)
                         last_emo_ts = now
                     # Save detection whenever we computed any of the two signals
                     if (emotion is not None) or (recog_conf is not None):
@@ -415,7 +535,13 @@ def detection_mode(args):
                         except Exception:
                             pass
                         conn_thr.commit()
-                # Publish results
+                else:
+                    # No detection this cycle: increment miss counter; keep last box for a few cycles to reduce flicker
+                    miss_count += 1
+                    if miss_count >= 5:
+                        sm_box = None
+                        box = None
+                # Publish results (keep last box up to 4 misses, then clear)
                 with result_lock:
                     if label is not None:
                         result['label'] = label
@@ -425,7 +551,13 @@ def detection_mode(args):
                         result['emotion'] = emotion
                     if emo_conf is not None:
                         result['emo_conf'] = float(emo_conf)
-                    result['box'] = box
+                    if box is not None:
+                        result['box'] = box
+                    else:
+                        # If we missed recently, keep previous; after threshold (miss_count>=5) clear
+                        if miss_count >= 5:
+                            result['box'] = None
+                        # else keep previous box
             except Exception:
                 # Avoid crashing the loop on transient errors
                 continue
@@ -509,13 +641,19 @@ def main():
     pd.add_argument('--emotion-scale', type=float, default=1.2, help='Factor de escala para el recorte usado en emociones (1.0-1.5)')
     pd.add_argument('--emotion-backend', type=str, default='opencv', choices=['opencv','retinaface','mediapipe','skip'], help='Backend para deteccion de rostro en emociones')
     pd.add_argument('--crop-padding', type=float, default=0.15, help='Padding adicional alrededor del rostro para emociones (0-0.3)')
+    # New advanced options
+    pd.add_argument('--detector-backend', type=str, default='opencv', choices=['opencv','opencv-dnn','retinaface','mediapipe'], help='Detector de rostro para el recorte principal')
+    pd.add_argument('--embed-model', type=str, default='ArcFace', choices=['ArcFace','Facenet','VGG-Face'], help='Modelo de embeddings para reconocimiento')
+    pd.add_argument('--emo-smooth-frames', type=int, default=5, help='Ventana de suavizado temporal para emociones (frames)')
+    pd.add_argument('--force-mjpg', action='store_true', help='Forzar formato MJPG en la camara para bajar latencia CPU')
+    pd.add_argument('--target-fps', type=float, default=0.0, help='Intentar fijar FPS objetivo de la camara (puede no tener efecto)')
+    pd.add_argument('--box-smooth-alpha', type=float, default=0.5, help='Factor de suavizado exponencial para la caja del rostro (0-1)')
 
     args = parser.parse_args()
     if args.mode == 'register':
         register_mode(args)
     elif args.mode == 'detect':
         detection_mode(args)
-
 
 if __name__ == '__main__':
     main()

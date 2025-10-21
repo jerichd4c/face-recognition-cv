@@ -419,11 +419,28 @@ def show_registration_page():
                 person_id = cur.lastrowid
 
             saved = 0
+            cascade = st.session_state.system.get_cascade()
             for raw in st.session_state.reg_captures:
                 try:
                     img = Image.open(io.BytesIO(raw)).convert("RGB")
-                    frame = np.array(img)
-                    emb = extract_embedding(frame)
+                    frame_rgb = np.array(img)
+                    # Detect and crop largest face for consistent embeddings
+                    gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+                    faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+                    if len(faces) > 0:
+                        (x, y, w, h) = max(faces, key=lambda b: b[2]*b[3])
+                        # Clamp within bounds
+                        x0 = max(0, x); y0 = max(0, y)
+                        x1 = min(frame_rgb.shape[1], x + w)
+                        y1 = min(frame_rgb.shape[0], y + h)
+                        crop_rgb = frame_rgb[y0:y1, x0:x1]
+                    else:
+                        # Fallback to center crop if no face detected
+                        h, w = frame_rgb.shape[:2]
+                        cx0 = int(w*0.2); cy0 = int(h*0.2)
+                        cx1 = int(w*0.8); cy1 = int(h*0.8)
+                        crop_rgb = frame_rgb[cy0:cy1, cx0:cx1]
+                    emb = extract_embedding(crop_rgb)
                     if emb is None:
                         continue
                     blob = pickle.dumps(emb)
@@ -453,11 +470,14 @@ def show_detection_page():
         infer_ms = st.slider("Intervalo inferencia (ms)", 100, 2000, 500, 50)
         detect_scale = st.slider("Escala detección rostro", 0.2, 1.0, 0.5, 0.05)
         infer_scale = st.slider("Escala de inferencia (rostro)", 0.3, 1.0, 0.5, 0.05)
+        detector_backend = st.selectbox("Detector de rostro (caja verde)", options=['opencv','opencv-dnn','retinaface','mediapipe'], index=1)
+        embed_model = st.selectbox("Modelo de embeddings", options=['ArcFace','Facenet','VGG-Face'], index=0)
     with c2:
-        emo_backend = st.selectbox("Backend emociones", options=['opencv','retinaface','mediapipe','skip'], index=1)
+        emo_backend = st.selectbox("Backend emociones (DeepFace)", options=['opencv','retinaface','mediapipe','skip'], index=1)
         emo_ms = st.slider("Intervalo emociones (ms)", 500, 3000, 1500, 50)
         crop_padding = st.slider("Padding recorte emociones", 0.0, 0.3, 0.15, 0.01)
         emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)
+        emo_smooth = st.slider("Suavizado emociones (frames)", 1, 15, 5, 1)
         disable_emotion = st.checkbox("Deshabilitar emociones (máximo FPS)", value=False)
 
     st.subheader("Ajustes de cámara")
@@ -485,6 +505,12 @@ def show_detection_page():
         with cwy:
             cam_h = st.number_input("Alto (px)", min_value=240, max_value=2160, value=720, step=16)
 
+    # Camera tuning (outside button for proper UI rendering)
+    st.subheader("Tuning de rendimiento")
+    force_mjpg = st.checkbox('Forzar MJPG (reduce latencia CPU)', value=True, key='mjpg')
+    target_fps = st.slider('FPS objetivo (intentar)', 0, 60, 30, 1, key='fps')
+    box_alpha = st.slider('Suavizado caja (alpha)', 0.0, 1.0, 0.5, 0.05, key='boxalpha')
+
     colb1, colb2, colb3 = st.columns([1,1,2])
     can_start = st.session_state.native_proc_pid is None
     with colb1:
@@ -497,17 +523,30 @@ def show_detection_page():
                     '--camera', str(int(cam_idx)),
                     '--threshold', str(float(threshold)),
                     '--infer-interval-ms', str(int(infer_ms)),
-                    '--emotion-interval-ms', str(int(emo_ms)),
                     '--scale', str(float(infer_scale)),
                     '--detect-scale', str(float(detect_scale)),
                     '--frame-width', str(int(cam_w)),
                     '--frame-height', str(int(cam_h)),
-                    '--emotion-backend', str(emo_backend),
-                    '--emotion-scale', str(float(emo_scale)),
-                    '--crop-padding', str(float(crop_padding)),
+                    '--detector-backend', str(detector_backend),
+                    '--embed-model', str(embed_model),
                 ]
-                if disable_emotion:
-                    cmd.append('--no-emotion')
+                # Emotions flags only if enabled
+                if not disable_emotion and emo_backend != 'skip':
+                    cmd += [
+                        '--emotion-interval-ms', str(int(emo_ms)),
+                        '--emotion-backend', str(emo_backend),
+                        '--emo-smooth-frames', str(int(emo_smooth)),
+                        '--emotion-scale', str(float(emo_scale)),
+                        '--crop-padding', str(float(crop_padding)),
+                    ]
+                else:
+                    cmd += ['--no-emotion']
+                # Camera tuning
+                if force_mjpg:
+                    cmd += ['--force-mjpg']
+                if target_fps > 0:
+                    cmd += ['--target-fps', str(int(target_fps))]
+                cmd += ['--box-smooth-alpha', str(float(box_alpha))]
                 creationflags = 0
                 if os.name == 'nt' and hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
                     creationflags = subprocess.CREATE_NEW_CONSOLE
