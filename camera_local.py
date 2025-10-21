@@ -15,6 +15,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 DB_PATH = 'facial_recognition.db'
 _WARNED_DNN_MISSING = False
+EMO_KEYS = ['angry','disgust','fear','happy','sad','surprise','neutral']
 
 
 def init_database(conn):
@@ -133,14 +134,33 @@ def analyze_emotion_full(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[
         )
         if ana:
             dist_percent = ana[0]['emotion']  # values 0..100
-            # Convert to 0..1 floats
-            dist = {k: float(v)/100.0 for k, v in dist_percent.items()}
-            emotion = ana[0]['dominant_emotion']
-            conf = float(dist.get(emotion, 0.0))
-            return emotion, conf, dist
-        return 'neutral', 0.0, {k: 0.0 for k in ['angry','disgust','fear','happy','sad','surprise','neutral']}
+            # Normalize keys: lowercase + synonyms
+            synonym_map = {
+                'anger': 'angry',
+                'happiness': 'happy',
+                'sadness': 'sad',
+                'surprised': 'surprise',
+                'fearful': 'fear',
+            }
+            norm = {}
+            for k, v in dist_percent.items():
+                kk = str(k).lower()
+                kk = synonym_map.get(kk, kk)
+                norm[kk] = float(v) / 100.0
+            # Build complete dist with 7 keys
+            # Add tiny epsilon to avoid exact zeros causing ties/instability
+            eps = 1e-6
+            dist = {k: float(norm.get(k, 0.0)) + eps for k in EMO_KEYS}
+            # Re-normalize to sum ~1
+            s = sum(dist.values()) or 1.0
+            dist = {k: v/s for k, v in dist.items()}
+            dom = str(ana[0].get('dominant_emotion', 'neutral')).lower()
+            dom = synonym_map.get(dom, dom)
+            conf = float(dist.get(dom, 0.0))
+            return dom, conf, dist
+        return 'neutral', 0.0, {k: 0.0 for k in EMO_KEYS}
     except Exception:
-        return 'neutral', 0.0, {k: 0.0 for k in ['angry','disgust','fear','happy','sad','surprise','neutral']}
+        return 'neutral', 0.0, {k: 0.0 for k in EMO_KEYS}
 
 
 def preprocess_emotion_roi(face_bgr: np.ndarray, upscale: float = 1.2, use_clahe: bool = True) -> np.ndarray:
@@ -534,7 +554,7 @@ def detection_mode(args):
                         if allow_log:
                             cur_thr.execute(
                                 "INSERT INTO Deteccion(id_persona, recog_confianza, emocion, emocion_confianza, timestamp) VALUES(?,?,?,?,?)",
-                                (pid, recog_conf if pid is not None else None, emotion if emotion is not None else 'neutral', emo_conf if emo_conf is not None else 0.0, datetime.now())
+                                (pid, float(recog_conf) if recog_conf is not None else 0.0, emotion if emotion is not None else 'neutral', float(emo_conf) if emo_conf is not None else 0.0, datetime.now())
                             )
                             det_id = cur_thr.lastrowid
                             # Persist full distribution if available
