@@ -472,6 +472,8 @@ def detection_mode(args):
         sm_box = None  # [x0,y0,x1,y1]
         miss_count = 0
         emo_hist = []
+        # Prior for balancing emotions (EMA)
+        emo_prior = {k: 1.0/len(EMO_KEYS) for k in EMO_KEYS}
         # To reduce flicker, only update label/emotion when we have new values
         while not stop_event.is_set():
             now = time.time()
@@ -552,6 +554,23 @@ def detection_mode(args):
                             e_dist['disgust'] = float(e_dist['disgust']) * gain
                             ssum = sum(e_dist.values()) or 1.0
                             e_dist = {k: float(v) / float(ssum) for k, v in e_dist.items()}
+                        # Optional balancing: reweight by inverse prior (EMA-based) to uniformize 7 classes
+                        try:
+                            if bool(getattr(args, 'emo_balance', False)):
+                                alpha = max(0.0, min(1.0, float(getattr(args, 'emo_balance_alpha', 0.15))))
+                                beta = max(0.0, float(getattr(args, 'emo_balance_strength', 1.0)))
+                                # Update prior with current distribution
+                                for k in EMO_KEYS:
+                                    emo_prior[k] = (1.0 - alpha) * float(emo_prior.get(k, 1.0/len(EMO_KEYS))) + alpha * float(e_dist.get(k, 0.0))
+                                # Compute inverse-prior weights
+                                eps = 1e-8
+                                w = {k: (1.0 / max(emo_prior.get(k, eps), eps))**beta for k in EMO_KEYS}
+                                # Apply weights and renormalize
+                                e_dist = {k: float(e_dist.get(k, 0.0)) * float(w[k]) for k in EMO_KEYS}
+                                ssum = sum(e_dist.values()) or 1.0
+                                e_dist = {k: float(v) / float(ssum) for k, v in e_dist.items()}
+                        except Exception:
+                            pass
                         # Smooth distribution over recent frames
                         if args.emo_smooth_frames and args.emo_smooth_frames > 1:
                             emo_hist.append(dict(e_dist))
@@ -709,6 +728,9 @@ def main():
     pd.add_argument('--emotion-backend', type=str, default='opencv', choices=['opencv','retinaface','mediapipe','skip'], help='Backend para deteccion de rostro en emociones')
     pd.add_argument('--crop-padding', type=float, default=0.15, help='Padding adicional alrededor del rostro para emociones (0-0.3)')
     pd.add_argument('--emo-disgust-gain', type=float, default=1.0, help="Ganancia/calibracion para 'disgust' (1.0 = sin cambio)")
+    pd.add_argument('--emo-balance', action='store_true', help='Balancear la distribucion de emociones hacia un prior uniforme (EMA)')
+    pd.add_argument('--emo-balance-strength', type=float, default=1.0, help='Fuerza del balanceo (beta). 0=sin efecto, 1=balance total')
+    pd.add_argument('--emo-balance-alpha', type=float, default=0.15, help='Alpha EMA para el prior de emociones (0-1)')
     # New advanced options
     pd.add_argument('--detector-backend', type=str, default='opencv', choices=['opencv','opencv-dnn','retinaface','mediapipe'], help='Detector de rostro para el recorte principal')
     pd.add_argument('--embed-model', type=str, default='Facenet', choices=['ArcFace','Facenet','VGG-Face'], help='Modelo de embeddings para reconocimiento')

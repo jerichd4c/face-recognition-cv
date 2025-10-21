@@ -479,6 +479,9 @@ def show_detection_page():
         emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)
         emo_smooth = st.slider("Suavizado emociones (frames)", 1, 15, 5, 1)
         emo_disgust_gain = st.slider("Ganancia 'disgusto' (calibración)", 0.5, 3.0, 1.0, 0.1, help="Multiplica la probabilidad de 'disgust' antes de normalizar. Útil si nunca aparece.")
+        emo_balance = st.checkbox("Balancear emociones (uniformizar 7 clases)", value=True, help="Repondera por prior (EMA) para que ninguna emoción quede subrepresentada")
+        emo_balance_strength = st.slider("Fuerza balanceo (beta)", 0.0, 2.0, 1.0, 0.1, help="0 = sin efecto; 1 = balance total; >1 sobrecompensa")
+        emo_balance_alpha = st.slider("Alpha balanceo (EMA)", 0.05, 0.5, 0.15, 0.01, help="Qué tan rápido se actualiza el prior de emociones")
         disable_emotion = st.checkbox("Deshabilitar emociones (máximo FPS)", value=False)
         min_log_ms = st.slider("Intervalo mínimo de guardado (ms)", 1000, 20000, 5000, 100, help="Limita la frecuencia con la que se escriben registros en la base de datos. Si hay una nueva emoción, se guardará aunque no se cumpla este intervalo.")
 
@@ -541,8 +544,12 @@ def show_detection_page():
                         '--emotion-scale', str(float(emo_scale)),
                         '--crop-padding', str(float(crop_padding)),
                         '--emo-disgust-gain', str(float(emo_disgust_gain)),
+                        '--emo-balance-strength', str(float(emo_balance_strength)),
+                        '--emo-balance-alpha', str(float(emo_balance_alpha)),
                         '--min-log-interval-ms', str(int(min_log_ms)),
                     ]
+                    if emo_balance:
+                        cmd += ['--emo-balance']
                 else:
                     cmd += ['--no-emotion']
                 # Camera tuning
