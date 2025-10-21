@@ -571,6 +571,19 @@ def detection_mode(args):
                                 e_dist = {k: float(v) / float(ssum) for k, v in e_dist.items()}
                         except Exception:
                             pass
+                        # If 'disgust' is close to the top class, gently tip it over to avoid being overshadowed
+                        try:
+                            top_k, top_v = max(e_dist.items(), key=lambda kv: kv[1])
+                            dg = float(e_dist.get('disgust', 0.0))
+                            margin = 0.05  # 5% margin
+                            if top_k != 'disgust' and dg >= (top_v - margin) and dg >= 0.12:
+                                # small boost then renormalize
+                                e_dist['disgust'] = dg * 1.15
+                                ssum = sum(e_dist.values()) or 1.0
+                                e_dist = {k: float(v) / float(ssum) for k, v in e_dist.items()}
+                        except Exception:
+                            pass
+
                         # Smooth distribution over recent frames
                         if args.emo_smooth_frames and args.emo_smooth_frames > 1:
                             emo_hist.append(dict(e_dist))
@@ -727,7 +740,7 @@ def main():
     pd.add_argument('--emotion-scale', type=float, default=1.2, help='Factor de escala para el recorte usado en emociones (1.0-1.5)')
     pd.add_argument('--emotion-backend', type=str, default='opencv', choices=['opencv','retinaface','mediapipe','skip'], help='Backend para deteccion de rostro en emociones')
     pd.add_argument('--crop-padding', type=float, default=0.15, help='Padding adicional alrededor del rostro para emociones (0-0.3)')
-    pd.add_argument('--emo-disgust-gain', type=float, default=1.0, help="Ganancia/calibracion para 'disgust' (1.0 = sin cambio)")
+    pd.add_argument('--emo-disgust-gain', type=float, default=1.6, help="Ganancia/calibracion para 'disgust' (1.0 = sin cambio)")
     pd.add_argument('--emo-balance', action='store_true', help='Balancear la distribucion de emociones hacia un prior uniforme (EMA)')
     pd.add_argument('--emo-balance-strength', type=float, default=1.0, help='Fuerza del balanceo (beta). 0=sin efecto, 1=balance total')
     pd.add_argument('--emo-balance-alpha', type=float, default=0.15, help='Alpha EMA para el prior de emociones (0-1)')

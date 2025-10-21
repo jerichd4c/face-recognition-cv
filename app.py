@@ -478,7 +478,7 @@ def show_detection_page():
         crop_padding = st.slider("Padding recorte emociones", 0.0, 0.3, 0.15, 0.01)
         emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)
         emo_smooth = st.slider("Suavizado emociones (frames)", 1, 15, 5, 1)
-        emo_disgust_gain = st.slider("Ganancia 'disgusto' (calibración)", 0.5, 3.0, 1.0, 0.1, help="Multiplica la probabilidad de 'disgust' antes de normalizar. Útil si nunca aparece.")
+        emo_disgust_gain = st.slider("Ganancia 'disgusto' (calibración)", 0.5, 3.0, 1.6, 0.1, help="Multiplica la probabilidad de 'disgust' antes de normalizar. Útil si nunca aparece.")
         emo_balance = st.checkbox("Balancear emociones (uniformizar 7 clases)", value=True, help="Repondera por prior (EMA) para que ninguna emoción quede subrepresentada")
         emo_balance_strength = st.slider("Fuerza balanceo (beta)", 0.0, 2.0, 1.0, 0.1, help="0 = sin efecto; 1 = balance total; >1 sobrecompensa")
         emo_balance_alpha = st.slider("Alpha balanceo (EMA)", 0.05, 0.5, 0.15, 0.01, help="Qué tan rápido se actualiza el prior de emociones")
