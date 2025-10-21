@@ -478,6 +478,7 @@ def show_detection_page():
         crop_padding = st.slider("Padding recorte emociones", 0.0, 0.3, 0.15, 0.01)
         emo_scale = st.slider("Escala emociones (upscale)", 1.0, 2.0, 1.2, 0.1)
         emo_smooth = st.slider("Suavizado emociones (frames)", 1, 15, 5, 1)
+        emo_disgust_gain = st.slider("Ganancia 'disgusto' (calibración)", 0.5, 3.0, 1.0, 0.1, help="Multiplica la probabilidad de 'disgust' antes de normalizar. Útil si nunca aparece.")
         disable_emotion = st.checkbox("Deshabilitar emociones (máximo FPS)", value=False)
         min_log_ms = st.slider("Intervalo mínimo de guardado (ms)", 1000, 20000, 5000, 100, help="Limita la frecuencia con la que se escriben registros en la base de datos. Si hay una nueva emoción, se guardará aunque no se cumpla este intervalo.")
 
@@ -539,6 +540,7 @@ def show_detection_page():
                         '--emo-smooth-frames', str(int(emo_smooth)),
                         '--emotion-scale', str(float(emo_scale)),
                         '--crop-padding', str(float(crop_padding)),
+                        '--emo-disgust-gain', str(float(emo_disgust_gain)),
                         '--min-log-interval-ms', str(int(min_log_ms)),
                     ]
                 else:

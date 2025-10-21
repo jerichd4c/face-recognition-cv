@@ -141,6 +141,9 @@ def analyze_emotion_full(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[
                 'sadness': 'sad',
                 'surprised': 'surprise',
                 'fearful': 'fear',
+                # Extra variants commonly seen
+                'disgusted': 'disgust',
+                'contempt': 'disgust',
             }
             norm = {}
             for k, v in dist_percent.items():
@@ -403,7 +406,8 @@ def detection_mode(args):
         'recog_conf': 0.0,
         'emotion': 'neutral',
         'emo_conf': 0.0,
-        'box': None
+        'box': None,
+        'emo_top3': ''
     }
 
     # Low-latency camera open (prefer DirectShow on Windows)
@@ -539,6 +543,15 @@ def detection_mode(args):
                         emo_bgr = cv2.cvtColor(face_rgb, cv2.COLOR_RGB2BGR)
                         emo_rgb = preprocess_emotion_roi(emo_bgr, upscale=max(1.0, float(args.emotion_scale)), use_clahe=True)
                         e_label, e_conf, e_dist = analyze_emotion_full(emo_rgb, backend=args.emotion_backend)
+                        # Optional calibration: boost 'disgust' probability before smoothing
+                        try:
+                            gain = max(0.0, float(getattr(args, 'emo_disgust_gain', 1.0)))
+                        except Exception:
+                            gain = 1.0
+                        if 'disgust' in e_dist and gain != 1.0:
+                            e_dist['disgust'] = float(e_dist['disgust']) * gain
+                            ssum = sum(e_dist.values()) or 1.0
+                            e_dist = {k: float(v) / float(ssum) for k, v in e_dist.items()}
                         # Smooth distribution over recent frames
                         if args.emo_smooth_frames and args.emo_smooth_frames > 1:
                             emo_hist.append(dict(e_dist))
@@ -551,6 +564,12 @@ def detection_mode(args):
                         else:
                             emotion, emo_conf = e_label, float(e_conf)
                         last_emo_ts = now
+                        # Compose Top-3 string for overlay
+                        try:
+                            top3 = sorted(e_dist.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                            top3_str = " | ".join([f"{k} {v*100:.0f}%" for k, v in top3])
+                        except Exception:
+                            top3_str = ''
                     # Save detection only if interval elapsed or emotion changed
                     if (emotion is not None) or (recog_conf is not None):
                         allow_log = False
@@ -594,6 +613,8 @@ def detection_mode(args):
                         result['emotion'] = emotion
                     if emo_conf is not None:
                         result['emo_conf'] = float(emo_conf)
+                    if 'top3_str' in locals():
+                        result['emo_top3'] = top3_str
                     if box is not None:
                         result['box'] = box
                     else:
@@ -644,7 +665,10 @@ def detection_mode(args):
             # simple moving estimate
             fps = 0.9*fps + 0.1*(1.0/dt) if fps > 0 else (1.0/dt)
         fps_ts = now
-        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180,180,0), 2)
+        # Top-3 emotions (debug/tuning)
+        if r.get('emo_top3'):
+            cv2.putText(frame, f"Top3: {r['emo_top3']}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (160,160,160), 2)
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180,180,0), 2)
         cv2.imshow('Deteccion - Camara', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             stop_event.set()
@@ -684,6 +708,7 @@ def main():
     pd.add_argument('--emotion-scale', type=float, default=1.2, help='Factor de escala para el recorte usado en emociones (1.0-1.5)')
     pd.add_argument('--emotion-backend', type=str, default='opencv', choices=['opencv','retinaface','mediapipe','skip'], help='Backend para deteccion de rostro en emociones')
     pd.add_argument('--crop-padding', type=float, default=0.15, help='Padding adicional alrededor del rostro para emociones (0-0.3)')
+    pd.add_argument('--emo-disgust-gain', type=float, default=1.0, help="Ganancia/calibracion para 'disgust' (1.0 = sin cambio)")
     # New advanced options
     pd.add_argument('--detector-backend', type=str, default='opencv', choices=['opencv','opencv-dnn','retinaface','mediapipe'], help='Detector de rostro para el recorte principal')
     pd.add_argument('--embed-model', type=str, default='Facenet', choices=['ArcFace','Facenet','VGG-Face'], help='Modelo de embeddings para reconocimiento')
