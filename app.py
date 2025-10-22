@@ -231,21 +231,37 @@ def main():
 # PAGE FUNCTIONS (REPORTS PAGE)
 
 # emotions chart
-def show_emotion_charts():
+def show_emotion_charts(emotion_filter: Optional[str] = None):
     st.subheader("Distribucion de emociones")
 
     try: 
         cursor = st.session_state.system.conn.cursor()  
 
         # obtain data from table
-        cursor.execute("""
-            SELECT COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
-                   D.emocion,
-                   COUNT(*) as conteo
-            FROM Deteccion D
-            LEFT JOIN Persona P ON D.id_persona = P.id
-            GROUP BY persona, emocion
-        """)
+        if emotion_filter and emotion_filter != 'Todas':
+            cursor.execute(
+                """
+                SELECT COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
+                       D.emocion,
+                       COUNT(*) as conteo
+                FROM Deteccion D
+                LEFT JOIN Persona P ON D.id_persona = P.id
+                WHERE D.emocion = ?
+                GROUP BY persona, emocion
+                """,
+                (emotion_filter,)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
+                       D.emocion,
+                       COUNT(*) as conteo
+                FROM Deteccion D
+                LEFT JOIN Persona P ON D.id_persona = P.id
+                GROUP BY persona, emocion
+                """
+            )
 
         data = cursor.fetchall()
 
@@ -458,6 +474,29 @@ def show_registration_page():
         except Exception as e:
             st.error(f"No se pudo guardar: {e}")
 
+    # Administración: eliminar persona
+    st.markdown("---")
+    st.subheader("Administración")
+    persons = st.session_state.system.get_all_persons()
+    if persons:
+        labels = [f"{pid} - {nom} {ape} ({email})" for (pid, nom, ape, email) in persons]
+        ids = [pid for (pid, _, _, _) in persons]
+        sel_index = st.selectbox("Seleccionar persona para eliminar", options=list(range(len(labels))), format_func=lambda i: labels[i])
+        if st.button("Eliminar persona definitivamente"):
+            try:
+                pid = ids[sel_index]
+                conn = st.session_state.system.conn
+                cur = conn.cursor()
+                cur.execute("DELETE FROM Rostro WHERE id_persona = ?", (pid,))
+                cur.execute("UPDATE Deteccion SET id_persona = NULL WHERE id_persona = ?", (pid,))
+                cur.execute("DELETE FROM Persona WHERE id = ?", (pid,))
+                conn.commit()
+                st.success("Persona eliminada correctamente")
+            except Exception as e:
+                st.error(f"No se pudo eliminar: {e}")
+    else:
+        st.info("No hay personas registradas para eliminar")
+
 
 # PAGE: Detección (nativo)
 def show_detection_page():
@@ -588,29 +627,53 @@ def show_detection_page():
 # PAGE: Reportes
 def show_reports_page():
     st.title("Reportes")
+    # Dropdown de filtro por emoción
+    try:
+        cur = st.session_state.system.conn.cursor()
+        cur.execute("SELECT DISTINCT emocion FROM Deteccion ORDER BY emocion")
+        emos = [r[0] for r in cur.fetchall()]
+    except Exception:
+        emos = []
+    emotion_options = ['Todas'] + emos
+    selected_emotion = st.selectbox("Filtrar por emoción", options=emotion_options, index=0)
+
     show_general_stats()
     st.markdown("---")
-    show_emotion_charts()
+    show_emotion_charts(selected_emotion)
     st.markdown("---")
     # Ultimas detecciones
     try:
         cur = st.session_state.system.conn.cursor()
-        cur.execute(
-            """
-            SELECT D.timestamp, COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
-                   D.recog_confianza, D.emocion, D.emocion_confianza
-            FROM Deteccion D
-            LEFT JOIN Persona P ON D.id_persona = P.id
-            ORDER BY D.timestamp DESC
-            LIMIT 100
-            """
-        )
+        if selected_emotion and selected_emotion != 'Todas':
+            cur.execute(
+                """
+                SELECT D.timestamp, COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
+                       D.recog_confianza, D.emocion, D.emocion_confianza
+                FROM Deteccion D
+                LEFT JOIN Persona P ON D.id_persona = P.id
+                WHERE D.emocion = ?
+                ORDER BY D.timestamp DESC
+                LIMIT 100
+                """,
+                (selected_emotion,)
+            )
+        else:
+            cur.execute(
+                """
+                SELECT D.timestamp, COALESCE(P.nombre || ' ' || P.apellido, 'Desconocido') as persona,
+                       D.recog_confianza, D.emocion, D.emocion_confianza
+                FROM Deteccion D
+                LEFT JOIN Persona P ON D.id_persona = P.id
+                ORDER BY D.timestamp DESC
+                LIMIT 100
+                """
+            )
         rows = cur.fetchall()
         if rows:
             df = pd.DataFrame(rows, columns=["timestamp", "persona", "recog_confianza", "emocion", "emocion_confianza"])
             st.dataframe(df, use_container_width=True)
         else:
-            st.info("No hay detecciones registradas")
+            st.info("No hay detecciones registradas para el filtro seleccionado")
     except Exception as e:
         st.error(f"Error al cargar detecciones: {e}")
 
