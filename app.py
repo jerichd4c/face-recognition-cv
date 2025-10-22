@@ -237,7 +237,7 @@ def show_emotion_charts(emotion_filter: Optional[str] = None):
     try: 
         cursor = st.session_state.system.conn.cursor()  
 
-        # obtain data from table
+    # Obtain data from the table
         if emotion_filter and emotion_filter != 'Todas':
             cursor.execute(
                 """
@@ -269,7 +269,7 @@ def show_emotion_charts(emotion_filter: Optional[str] = None):
 
             df_data = []
             for row in data:
-                # normalize column names to use in the chart
+                # Normalize column names for chart rendering
                 df_data.append({
                     "Persona": row[0],
                     "Emocion": row[1],
@@ -295,11 +295,11 @@ def show_general_stats():
 
         col1, col2, col3, col4 = st.columns(4)
 
-        # registered persons
+    # Registered people
         cursor.execute("SELECT COUNT(*) FROM Persona")
         total_personas = cursor.fetchone()[0]
 
-        # detections today (localtime window)
+    # Detections today (localtime window)
         cursor.execute(
             """
             SELECT COUNT(*) FROM Deteccion
@@ -309,7 +309,7 @@ def show_general_stats():
         )
         detecciones_hoy = cursor.fetchone()[0]
 
-        # most common emotion
+    # Most common emotion
         cursor.execute(
             """
             SELECT emocion, COUNT(*) as count
@@ -322,14 +322,14 @@ def show_general_stats():
         emocion_data = cursor.fetchone()
         emocion_predominante = emocion_data[0] if emocion_data else "N/A"
 
-        # recognition rate (estimated) using recog_confianza
+    # Recognition rate (estimated) using recog_confianza
         cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE recog_confianza IS NOT NULL AND recog_confianza > 0.7")
         reconocimientos_confiables = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM Deteccion WHERE recog_confianza IS NOT NULL")
         total_reconocimientos = cursor.fetchone()[0]
         tasa_reconocimiento = (reconocimientos_confiables / total_reconocimientos * 100) if total_reconocimientos > 0 else 0
 
-        # metrics
+    # Metrics
         with col1:
             st.metric("Total de personas registradas", total_personas)
         with col2:
@@ -339,7 +339,7 @@ def show_general_stats():
         with col4:
             st.metric("Tasa de reconocimientos confiables", f"{tasa_reconocimiento:.1f}%")
 
-        # query for detections per hour
+    # Query detections per hour
         st.subheader("Patrón de detecciones por hora")
         cursor.execute(
             """
@@ -365,7 +365,7 @@ def show_general_stats():
         st.error(f"Error al mostrar estadisticas generales: {e}")
 
 
-# PAGE: Registro
+# PAGE: Registration
 def show_registration_page():
     st.title("Registro de Personas")
     with st.form("form-registro"):
@@ -410,19 +410,19 @@ def show_registration_page():
         st.write(f"Capturas acumuladas: {len(st.session_state.reg_captures)}")
         save_now = st.button("Guardar en base de datos", disabled=(not st.session_state.reg_form_ok or len(st.session_state.reg_captures) == 0))
 
-    # Preview de thumbnails
+    # Preview of thumbnails
     if st.session_state.reg_captures:
         cols = st.columns(3)
         for i, raw in enumerate(st.session_state.reg_captures[-6:]):
             with cols[i % 3]:
                 st.image(Image.open(io.BytesIO(raw)), caption=f"Captura #{i+1}", use_container_width=True)
 
-    # Guardado
+    # Saving
     if save_now:
         try:
             conn = st.session_state.system.conn
             cur = conn.cursor()
-            # Crear/obtener persona
+            # Create or get person
             cur.execute("SELECT id FROM Persona WHERE email = ?", (st.session_state.reg_form_data["email"],))
             row = cur.fetchone()
             if row:
@@ -440,18 +440,18 @@ def show_registration_page():
                 try:
                     img = Image.open(io.BytesIO(raw)).convert("RGB")
                     frame_rgb = np.array(img)
-                    # Detect and crop largest face for consistent embeddings
+                    # Detect and crop the largest face for consistent embeddings
                     gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
                     faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
                     if len(faces) > 0:
                         (x, y, w, h) = max(faces, key=lambda b: b[2]*b[3])
-                        # Clamp within bounds
+                        # Clamp within image bounds
                         x0 = max(0, x); y0 = max(0, y)
                         x1 = min(frame_rgb.shape[1], x + w)
                         y1 = min(frame_rgb.shape[0], y + h)
                         crop_rgb = frame_rgb[y0:y1, x0:x1]
                     else:
-                        # Fallback to center crop if no face detected
+                        # Fallback to center crop if no face is detected
                         h, w = frame_rgb.shape[:2]
                         cx0 = int(w*0.2); cy0 = int(h*0.2)
                         cx1 = int(w*0.8); cy1 = int(h*0.8)
@@ -466,7 +466,7 @@ def show_registration_page():
                     continue
             conn.commit()
             st.success(f"Guardado: {saved} capturas para {st.session_state.reg_form_data['nombre']} {st.session_state.reg_form_data['apellido']}")
-            # limpiar estado
+            # Clear registration state
             st.session_state.reg_captures = []
             st.session_state.reg_hashes = set()
             st.session_state.reg_embs = {}
@@ -474,7 +474,7 @@ def show_registration_page():
         except Exception as e:
             st.error(f"No se pudo guardar: {e}")
 
-    # Administración: eliminar persona
+    # Administration: delete person
     st.markdown("---")
     st.subheader("Administración")
     persons = st.session_state.system.get_all_persons()
@@ -498,7 +498,7 @@ def show_registration_page():
         st.info("No hay personas registradas para eliminar")
 
 
-# PAGE: Detección (nativo)
+# PAGE: Detection (native)
 def show_detection_page():
     st.title("Detección en Tiempo Real (Nativo OpenCV)")
     st.caption("Se abrirá una ventana nativa con el video y overlay. Cierra con 'q'.")
@@ -574,7 +574,7 @@ def show_detection_page():
                     '--detector-backend', str(detector_backend),
                     '--embed-model', str(embed_model),
                 ]
-                # Emotions flags only if enabled
+                # Emotion flags only if enabled
                 if not disable_emotion and emo_backend != 'skip':
                     cmd += [
                         '--emotion-interval-ms', str(int(emo_ms)),
@@ -591,7 +591,7 @@ def show_detection_page():
                         cmd += ['--emo-balance']
                 else:
                     cmd += ['--no-emotion']
-                # Camera tuning
+                # Camera tuning flags
                 if force_mjpg:
                     cmd += ['--force-mjpg']
                 if target_fps > 0:
@@ -624,10 +624,10 @@ def show_detection_page():
         st.write(f"Estado: {'En ejecución (PID '+str(pid)+')' if pid else 'Detenido'}")
 
 
-# PAGE: Reportes
+# PAGE: Reports
 def show_reports_page():
     st.title("Reportes")
-    # Dropdown de filtro por emoción
+    # Dropdown to filter by emotion
     try:
         cur = st.session_state.system.conn.cursor()
         cur.execute("SELECT DISTINCT emocion FROM Deteccion ORDER BY emocion")
@@ -641,7 +641,7 @@ def show_reports_page():
     st.markdown("---")
     show_emotion_charts(selected_emotion)
     st.markdown("---")
-    # Ultimas detecciones
+    # Latest detections
     try:
         cur = st.session_state.system.conn.cursor()
         if selected_emotion and selected_emotion != 'Todas':
@@ -676,7 +676,6 @@ def show_reports_page():
             st.info("No hay detecciones registradas para el filtro seleccionado")
     except Exception as e:
         st.error(f"Error al cargar detecciones: {e}")
-
 
 if __name__ == "__main__":
     main()

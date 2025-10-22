@@ -12,15 +12,13 @@ from cv2 import data as cv2_data
 from deepface import DeepFace
 from sklearn.metrics.pairwise import cosine_similarity
 
-
 DB_PATH = 'facial_recognition.db'
 _WARNED_DNN_MISSING = False
 EMO_KEYS = ['angry','disgust','fear','happy','sad','surprise','neutral']
 
-
 def init_database(conn):
     cur = conn.cursor()
-    # Personas
+    # People table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS Persona (
@@ -32,7 +30,7 @@ def init_database(conn):
         )
         """
     )
-    # Rostros (embeddings)
+    # Faces (embeddings)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS Rostro (
@@ -43,7 +41,7 @@ def init_database(conn):
         )
         """
     )
-    # Detecciones (esquema v2)
+    # Detections (v2 schema)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS Deteccion (
@@ -57,7 +55,7 @@ def init_database(conn):
         )
         """
     )
-    # Detalle de emociones por detección (distribución completa)
+    # Emotion details per detection (full distribution)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS DeteccionEmocionDetalle (
@@ -125,7 +123,7 @@ def analyze_emotion_full(image_rgb: np.ndarray, backend: str = 'skip') -> tuple[
             image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         else:
             image_bgr = image_rgb
-        # ROI ya está recortado; evitamos re-detección para mayor estabilidad
+    # ROI is already cropped; skip re-detection for better stability
         ana = DeepFace.analyze(
             img_path=image_bgr,
             actions=['emotion'],
@@ -237,19 +235,19 @@ def detect_largest_face(frame_bgr: np.ndarray, gray: np.ndarray, backend: str, c
                 return best[1] if best[1] is not None else (None, None, None, None)
             except Exception:
                 pass  # fall back to opencv
-        # If opencv-dnn requested but not available, note it
+    # If opencv-dnn is requested but not available, note it
         if backend == 'opencv-dnn' and dnn_net is None:
-            # Only print once
+            # Only warn once
             global _WARNED_DNN_MISSING
             if not _WARNED_DNN_MISSING:
                 print("[WARN] opencv-dnn backend seleccionado pero modelo Caffe no encontrado en ./models; usando Haar cascade.")
                 _WARNED_DNN_MISSING = True
-        # Default: OpenCV Haar cascade
+    # Default: OpenCV Haar cascade
         ds = float(detect_scale) if 0.2 <= detect_scale <= 1.0 else 0.5
         small = cv2.resize(gray, (0, 0), fx=ds, fy=ds)
-        # Más permisivo para facilitar detección inicial
+    # More permissive to facilitate initial detection
         faces = cascade.detectMultiScale(small, 1.05, 3, minSize=(max(24, int(40*ds)), max(24, int(40*ds))))
-        # If no faces at scaled size, retry at full size to improve robustness
+    # If no faces at scaled size, retry at full size to improve robustness
         if len(faces) == 0 and ds != 1.0:
             faces = cascade.detectMultiScale(gray, 1.05, 3, minSize=(40, 40))
             if len(faces) == 0:
@@ -712,7 +710,6 @@ def detection_mode(args):
     t_inf.join(timeout=1.0)
     cap.release()
     cv2.destroyAllWindows()
-
 
 def main():
     parser = argparse.ArgumentParser(description='Camara local para registro y deteccion (alta fluidez)')
